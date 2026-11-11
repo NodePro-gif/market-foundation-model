@@ -79,10 +79,31 @@ bisa menampilkannya lagi.
 
 ---
 
+## 2026-11-11 — "cari solusi": walk-forward + probe transfer
+
+| jam | tahap | apa yang terjadi | hasil |
+|---|---|---|---|
+| 18:20 | **baru** | `walkforward_stage4.py` — 3 fold jujur (pilih Platt+thr+horizon di 2 tahun sebelum test year) | selesai 717 dtk: **agregat 116 taruhan, acc 0,9052, z=+8,73**, gross +2,49%, **net@0,5bps +1,33%** ✅ / net@1,5bps −0,99% |
+| 18:32 | **baru** | `probe_transfer.py` — bekukan backbone, latih kepala di 16 simbol 2015–2022, uji held-out 2023 | sedang berjalan (±40 menit) |
+
+### Temuan walk-forward (inti)
+
+1. **Akurasinya nyata dan stabil lintas tahun**: 0,9565 / 0,9231 / 0,8409 di
+   3 fold berbeda → z=+8,73 vs 50%. Bukan overfit ke 2023.
+2. **Masih belum cukup untuk menutup biaya 1,5 bps/side** (agregat −0,99%):
+   gross per taruhan tipis (±0,21 bps) di horizon pendek yang dipilih tiap fold.
+3. Kesimpulan: **edge-nya ada, tapi tipis** — profitabel hanya kalau biaya
+   ≤0,5 bps/side (spread ECN ketat) atau gross bisa dinaikkan (backbone lebih
+   kuat → pretraining 6000 steps + fine-tune penuh).
+
+---
+
 ## Status akhir sesi ini
 
-- Semua tahap (stage1 → stage2 → verify → stage4 ×2 → backtest → validate)
-  **selesai tanpa error**; log tersimpan di `logs/` (di-ignore git).
+- Semua tahap (stage1 → stage2 → verify → stage4 ×2 → backtest → validate →
+  walk-forward) **selesai tanpa error**; log tersimpan di `logs/` (di-ignore git).
+- **Sedang berjalan**: `probe_transfer.py` (multi-symbol heads, ±40 menit) →
+  hasil mengisi `results/finetune/transfer.json` dan bagian atas catatan ini.
 - Dashboard: `python monitor.py`.
-- Push: commit `6d520c1`, `664811c`, `b47c692` + commit hasil validasi ini
-  sudah/akan dikirim ke `origin/main`.
+- Push: commit `6d520c1`, `664811c`, `b47c692`, `8e6fab1` sudah di
+  `origin/main`; walk-forward + probe menyusul di commit berikutnya.

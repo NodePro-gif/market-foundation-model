@@ -321,6 +321,32 @@ Peringatan jujur: n=87 kecil (CI akurasi ±±6%), biaya masih asumsi (slippage
 & komisi broker belum masuk), dan 0,5 bps/side hanya masuk akal di spread
 ECN paling ketat. Angka lengkap: `results/finetune/validation.json`.
 
+### Walk-forward multi-fold (`walkforward_stage4.py`, baru)
+
+Satu hasil test 2023 bersandar pada 87 taruhan — terlalu kecil. Script ini
+menjalankan **3 fold jujur**: tiap fold memilih Platt + threshold + horizon di
+2 tahun sebelumnya, lalu menilai tahun berikutnya (test 2021/2022/2023).
+
+| fold (pilih di → test) | thr | k bar | n | acc | gross | net@0,5bps | net@1,5bps | net@3,0bps |
+|---|---|---|---|---|---|---|---|---|
+| 2019–20 → 2021 | 0,750 | 3 | 46 | 0,9565 | +1,49% | +1,03% | +0,11% | −1,27% |
+| 2020–21 → 2022 | 0,775 | 3 | 26 | 0,9231 | +0,15% | −0,11% | −0,63% | −1,41% |
+| 2021–22 → 2023 | 0,800 | 1 | 44 | 0,8409 | +0,85% | +0,41% | −0,47% | −1,79% |
+| **agregat** | — | — | **116** | **0,9052** | **+2,49%** | **+1,33%** ✅ | −0,99% | −4,47% |
+
+**Interpretasi jujur:**
+
+- **Sinyal akurasi sangat kuat & stabil**: z = **+8,73** terhadap hipotesis
+  50% (p ≈ 1e-17). Akurasi 0,905 dari 116 taruhan out-of-sample bukan kebetulan.
+- **Tapi gross-nya tipis** (rata-rata ±0,21 bps/taruhan di horizon pendek) →
+  di 1,5 bps/side masih **−0,99%**. Profitabel hanya di **≤0,5 bps/side
+  (+1,33%)**, artinya butuh spread ECN paling ketat.
+- n per fold kecil (26–46) karena threshold ekstrem (0,75–0,8) memang jarang
+  memicu taruhan — itu konsekuensi jujur dari "hanya bertaruh saat yakin".
+- Kalibrasi terkalibrasi baik di semua fold (ECE 0,046–0,079).
+
+Angka lengkap: `results/finetune/walkforward.json`, log `logs/walkforward.log`.
+
 ### Knob untuk mesin kecil (defaults = konfigurasi asli Colab/GPU)
 
 `stage4_finetune.py` bisa dijalankan di CPU tanpa mengubah kode lewat env var:
