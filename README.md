@@ -271,6 +271,25 @@ kebetulan; run 1 epoch: +0,55 bps, t 3,66) **masih di bawah** asumsi biaya
 spread/biaya lebih rendah (XAUUSD spread tipis justru masuk akal untuk
 seleksi taruhan ber-`p` ekstrem), atau horizon lebih panjang dari satu bar.
 
+#### Sweep threshold — taruhan hanya di `p` ekstrem (bagian dari `backtest_stage4.py`)
+
+| thr | n taruhan | akurasi | gross | net @3bps | bps/taruhan | t-stat | BE bps/side |
+|---|---|---|---|---|---|---|---|
+| 0,50 (semua) | 780 | 0,587 | +6,10% | −17,30% | +0,78 | 5,28 | 0,39 |
+| 0,55 | 632 | 0,625 | +6,10% | −12,86% | +0,97 | 5,76 | 0,48 |
+| 0,60 | 497 | 0,672 | +6,35% | −8,56% | +1,28 | 6,82 | 0,64 |
+| 0,65 | 408 | 0,708 | +5,47% | −6,77% | +1,34 | 7,01 | 0,67 |
+| 0,70 | 353 | 0,742 | +5,10% | −5,49% | +1,45 | 6,99 | 0,72 |
+| **0,75** | 285 | **0,779** | +4,44% | −4,11% | **+1,56** | **7,51** | **0,78** |
+
+Seleksi taruhan **menaikkan edge per taruhan 2×** (0,78 → 1,56 bps, akurasi
+0,587 → 0,779) tapi masih di bawah biaya 1,5 bps/side → net tetap minus.
+Catatan: spread XAUUSD ECN yang ketat (±$0,05–0,15 pada harga ±2.000 ≈
+**0,25–0,75 bps/side**) sudah di kisaran breakeven threshold 0,70–0,75 →
+inilah hipotesis yang harus diverifikasi. **Peringatan jujur:** threshold ini
+dipilih *setelah* melihat hasil test → risiko overfitting ke test; pada run
+resmi, pilih threshold di data validasi (2021–2022) lalu kunci sebelum 2023.
+
 ### Knob untuk mesin kecil (defaults = konfigurasi asli Colab/GPU)
 
 `stage4_finetune.py` bisa dijalankan di CPU tanpa mengubah kode lewat env var:
@@ -318,3 +337,7 @@ python -u backtest_stage4.py
 3. ~~Backtest biaya-nyata (cost-aware) dari prediksi arah~~ — **sudah ada**:
    `backtest_stage4.py` (lihat tabel di atas); tinggal dijalankan ulang dengan
    konfigurasi GPU penuh.
+4. **Kalibrasi + pemilihan threshold di data validasi** (2021–2022), kunci
+   sebelum menyentuh 2023 — sekarang threshold sweep masih post-hoc di test.
+   Sumber biaya nyata juga harus diukur (spread komposit broker) alih-alih
+   asumsi 1,5 bps/side.

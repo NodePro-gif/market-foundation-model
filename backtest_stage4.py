@@ -85,6 +85,25 @@ def main():
     equity = np.cumprod(1 + (sig * fwd - long_cost))
     buyhold = np.cumprod(1 + fwd)
 
+    # --- threshold sweep: bet only on extreme probabilities ---------------
+    sweep = []
+    for t in (0.50, 0.55, 0.60, 0.65, 0.70, 0.75):
+        s2 = np.where(pred >= t, 1, np.where(pred <= 1 - t, -1, 0))
+        m = s2 != 0
+        n = int(m.sum())
+        if n < 10:
+            continue
+        r = s2[m] * fwd[m]
+        tstat = (r.mean() / (r.std() + 1e-12) * np.sqrt(len(r))
+                 if len(r) > 1 else 0.0)
+        sweep.append(dict(
+            threshold=t, n=n,
+            acc=float((np.where(pred[m] >= 0.5, 1, 0) == y[m]).mean()),
+            gross_total=float(r.sum()),
+            net_total=float(r.sum() - n * 2 * COST_PER_SIDE),
+            mean_bps=float(r.mean() * 1e4), t_stat=float(tstat),
+            breakeven_side_bps=float(r.mean() * 1e4 / 2)))
+
     res = dict(
         n_bets=int(len(b)), stride=int(s4.TEST_STRIDE),
         cost_per_side=COST_PER_SIDE,
@@ -92,6 +111,7 @@ def main():
         first_ts=int(ts[b[0]]), last_ts=int(ts[b[-1]]),
         head=dict(acc=hit, brier=brier),
         strategies=rows,
+        threshold_sweep=sweep,
         benchmark_buynhold=dict(
             total=float(buyhold[-1] - 1) if len(buyhold) else 0.0),
     )
@@ -127,6 +147,14 @@ def main():
               f"mean_bps={r['mean_bps']:+.2f} sharpe={r['sharpe']:+.2f}")
     print(f"  buy & hold                 equity={buyhold[-1]:+.4f} "
           f"total={buyhold[-1]-1:+.4%}")
+    print("--- threshold sweep (bet only on extreme p) ---")
+    print(f"  {'thr':>5} {'n':>5} {'acc':>6} {'gross%':>8} {'net%':>8} "
+          f"{'bps/bet':>8} {'t':>6} {'BE bps/side':>13}")
+    for s in sweep:
+        print(f"  {s['threshold']:5.2f} {s['n']:5d} {s['acc']:6.3f} "
+              f"{s['gross_total']*100:8.2f} {s['net_total']*100:8.2f} "
+              f"{s['mean_bps']:8.2f} {s['t_stat']:6.2f} "
+              f"{s['breakeven_side_bps']:13.2f}")
     print("BACKTEST DONE", flush=True)
 
 
