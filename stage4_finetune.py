@@ -28,12 +28,26 @@ import stage3_pretrain as s3
 
 IS_COLAB = os.path.isdir("/content")
 MKT = s3.MKT
-OUT = "/content/ftune" if IS_COLAB else r"D:\xauusd-dl\ftune"
+# local runs write into the repo so results travel with the code
+OUT = ("/content/ftune" if IS_COLAB
+       else os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "results", "finetune"))
 os.makedirs(OUT, exist_ok=True)
 
-EPOCHS = 3
-LR = 1e-4
-BATCH = 256
+
+def _env(name, default, cast):
+    v = os.environ.get(name)
+    return default if v is None or v == "" else cast(v)
+
+
+# knobs so the same script runs on a GPU box (defaults = original config)
+# and on a small CPU box (ST4_EPOCHS=1 ST4_BATCH=32 ST4_STRIDE=64 ...)
+EPOCHS = _env("ST4_EPOCHS", 3, int)
+LR = _env("ST4_LR", 1e-4, float)
+BATCH = _env("ST4_BATCH", 256, int)
+STRIDE = _env("ST4_STRIDE", 4, int)            # train windows stride
+TEST_STRIDE = _env("ST4_TEST_STRIDE", 4, int)  # 2023 test windows stride
+HELD_STRIDE = _env("ST4_HELD_STRIDE", 8, int)  # held-out symbol windows stride
 SEED = 42
 TARGET_SYM = "XAUUSD"
 HELD = ["NIKKEI", "BRENT", "EURGBP"]
@@ -261,16 +275,23 @@ def run_epoch(model, dl, opt=None):
 def main():
     ckpt = os.environ.get("CKPT", "/content/ckpt/best.pt")
     if not os.path.exists(ckpt):
-        cand = [f for f in os.listdir(s3.CKPT) if f.endswith(".pt")]
-        ckpt = os.path.join(s3.CKPT, sorted(cand)[-1])
+        # fall back to the repo's ckpt/ (best.pt is committed), then local CKPT dir
+        repo_ck = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ckpt")
+        cands = []
+        for d in (repo_ck, s3.CKPT):
+            if os.path.isdir(d):
+                cands += [os.path.join(d, f) for f in os.listdir(d)
+                          if f.endswith(".pt")]
+        if cands:
+            ckpt = sorted(cands)[-1]
     log(f"loading pretrained from {ckpt}")
     base = load_base(ckpt)
     model = FinetuneGPT(base).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f"finetune model params: {n_params/1e6:.2f}M")
 
-    train_ds = FinetuneDS(TARGET_SYM, years=range(2015, 2023), stride=4)
-    test_ds = FinetuneDS(TARGET_SYM, years=[2023], stride=4)
+    train_ds = FinetuneDS(TARGET_SYM, years=range(2015, 2023), stride=STRIDE)
+    test_ds = FinetuneDS(TARGET_SYM, years=[2023], stride=TEST_STRIDE)
     tr_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True)
     te_dl = DataLoader(test_ds, batch_size=BATCH, shuffle=False)
 
@@ -307,7 +328,7 @@ def main():
     held_res = {}
     for sym in HELD:
         try:
-            ds = FinetuneDS(sym, years=[2023], stride=8)
+            ds = FinetuneDS(sym, years=[2023], stride=HELD_STRIDE)
             if len(ds) == 0:
                 continue
             dl = DataLoader(ds, batch_size=BATCH, shuffle=False)

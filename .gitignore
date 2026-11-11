@@ -14,3 +14,8 @@ __pycache__/
 # --- os / editor ---
 .DS_Store
 Thumbs.db
+
+# --- fine-tune artifacts too heavy for git (metrics.json is kept) ---
+results/finetune/*.pt
+results/finetune/*.npy
+results/finetune/*.csv
