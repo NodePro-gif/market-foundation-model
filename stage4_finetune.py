@@ -220,13 +220,16 @@ def load_base(ckpt_path):
     return base
 
 
-def run_epoch(model, dl, opt=None):
+def run_epoch(model, dl, opt=None, tag=""):
     training = opt is not None
     model.train(training)
     tot = dict(dir=0.0, vol=0.0, q=0.0, n=0)
     ps, ys, regs, ts = [], [], [], []
     crit_bce = nn.BCEWithLogitsLoss()
-    for xb, yd, yv, yq, vq in dl:
+    n_steps = len(dl)
+    every = max(1, n_steps // 10)          # ~10 progress lines per epoch
+    ep_t0 = time.time()
+    for i, (xb, yd, yv, yq, vq) in enumerate(dl):
         xb = xb.to(DEVICE)
         yd = yd.to(DEVICE).float()
         yv = yv.to(DEVICE)
@@ -244,6 +247,13 @@ def run_epoch(model, dl, opt=None):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+        if training and (i % every == 0 or i == n_steps - 1):
+            el = time.time() - ep_t0
+            eta = el * (n_steps - i - 1) / max(i + 1, 1)
+            log(f"  {tag} step {i+1:>4}/{n_steps} "
+                f"({100*(i+1)/n_steps:3.0f}%) loss={loss.item():.4f} "
+                f"dir={l_dir.item():.4f} vol={l_vol.item():.4f} "
+                f"q={l_q.item():.4f} elapsed={el:.0f}s eta={eta:.0f}s")
         b = len(xb)
         tot["dir"] += l_dir.item() * b
         tot["vol"] += l_vol.item() * b
@@ -299,7 +309,7 @@ def main():
                             lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
     best = -1.0
     for ep in range(1, EPOCHS + 1):
-        r = run_epoch(model, tr_dl, opt)
+        r = run_epoch(model, tr_dl, opt, tag=f"ep{ep} TRAIN")
         log(f"ep{ep} TRAIN loss_dir={r['loss_dir']:.4f} "
             f"loss_vol={r['loss_vol']:.4f} loss_q={r['loss_q']:.4f} "
             f"acc={r['acc']:.4f} auc={r['auc']:.4f}")

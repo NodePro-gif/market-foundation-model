@@ -19,3 +19,6 @@ Thumbs.db
 results/finetune/*.pt
 results/finetune/*.npy
 results/finetune/*.csv
+
+# --- run logs (local trace; PROGRESS.md holds the human-readable record) ---
+logs/

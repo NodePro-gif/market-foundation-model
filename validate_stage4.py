@@ -28,7 +28,8 @@ import stage4_finetune as s4
 
 VAL_YEARS = (2021, 2022)
 HORIZONS = (1, 3, 6, 12, 24, 48)          # bars held (must be <= stride grid)
-COSTS_SIDE = (0.0005, 0.0015, 0.0030)     # 0.5 / 1.5 / 3.0 bps per side
+# 0.5 / 1.5 / 3.0 bps PER SIDE (1 bps = 1e-4); round trip = 2 sides
+COSTS_SIDE = (0.00005, 0.00015, 0.00030)
 MIN_BETS = 100
 THR_GRID = np.round(np.arange(0.50, 0.801, 0.025), 3)
 
@@ -103,10 +104,23 @@ def main():
     log(f"validation years {VAL_YEARS}")
     val_ds = s4.FinetuneDS(s4.TARGET_SYM, years=VAL_YEARS,
                            stride=s4.TEST_STRIDE)
-    log("running model on validation windows ...")
-    pv, yv = predict(val_ds)
+    cache_p, cache_y = f"{OUT}/val_pred.npy", f"{OUT}/val_y.npy"
+    if os.path.exists(cache_p) and os.path.exists(cache_y):
+        pv, yv = np.load(cache_p), np.load(cache_y)
+        if len(pv) == len(val_ds):
+            log(f"reusing cached validation probs (n={len(pv)})")
+        else:
+            pv = yv = None
+    else:
+        pv = yv = None
+    if pv is None:
+        log("running model on validation windows ...")
+        pv, yv = predict(val_ds)
+        np.save(cache_p, pv)
+        np.save(cache_y, yv)
     bv = np.asarray(val_ds.bars)
-    log(f"validation n={len(pv):,} acc={float((pv >= .5) == yv).mean():.4f} "
+    log(f"validation n={len(pv):,} "
+        f"acc={float(((pv >= .5) == yv).mean()):.4f} "
         f"brier/ece={brier_ece(pv, yv)} auc={auc_rank(yv, pv):.4f}")
 
     # ---------------------------------------------------------- calibration
@@ -146,14 +160,47 @@ def main():
                          f"ST4_STRIDE/ST4_TEST_STRIDE env")
     pc = cal(pred)
 
+    # --- pick the holding horizon on VALIDATION too (never on the test set)
+    sigv = np.where(pvc >= thr, 1, np.where(pvc <= 1 - thr, -1, 0))
+    mv = sigv != 0
+    val_horizons = []
+    for k in HORIZONS:
+        rv = sigv[mv] * next_returns(bv[mv], c, k)
+        n = int(np.isfinite(rv).sum())
+        if n < 10:
+            continue
+        gross = float(np.nansum(rv))
+        val_horizons.append(dict(
+            horizon=k, n=n, gross_total=gross,
+            nets={f"{co}": gross - n * 2 * co for co in COSTS_SIDE}))
+    k_best = None
+    if val_horizons:
+        best = max(val_horizons,
+                   key=lambda h: h["nets"][f"{COSTS_SIDE[1]}"])
+        k_best = int(best["horizon"])
+        log(f"horizon dipilih di validation @1.5bps/side: k={k_best} bar "
+            f"(val gross {best['gross_total']*100:+.2f}%, "
+            f"net {best['nets'][f'{COSTS_SIDE[1]}']*100:+.2f}%)")
+        print("--- horizon di VALIDATION (untuk pemilihan, bukan hasil test) ---")
+        print(f"  {'k bars':>7} {'n':>5} {'gross':>9} "
+              + " ".join(f"net@{co*1e4:4.1f}bps".rjust(11)
+                         for co in COSTS_SIDE))
+        for h in val_horizons:
+            cells = [f"{h['nets'][f'{co}']*100:+10.2f}%" for co in COSTS_SIDE]
+            mark = "  <== dipilih" if h["horizon"] == k_best else ""
+            print(f"  {h['horizon']:7d} {h['n']:5d} "
+                  f"{h['gross_total']*100:+8.2f}% " + " ".join(cells) + mark)
+
     res = dict(
         val_years=list(VAL_YEARS), val_n=int(len(pv)),
-        val=dict(acc=float((pv >= .5) == yv).mean(),
+        val=dict(acc=float(((pv >= .5) == yv).mean()),
                  brier_ece=list(brier_ece(pv, yv)), auc=auc_rank(yv, pv)),
         val_calibrated=dict(brier_ece=list(brier_ece(pvc, yv))),
         platt=dict(a=float(platt.coef_[0][0]), b=float(platt.intercept_[0])),
         threshold=float(thr),
-        test=dict(acc=float((pred >= .5) == y).mean(),
+        chosen_horizon=k_best,
+        val_horizons=val_horizons,
+        test=dict(acc=float(((pred >= .5) == y).mean()),
                   brier_ece=list(brier_ece(pred, y)),
                   auc=auc_rank(y, pred),
                   brier_ece_calibrated=list(brier_ece(pc, y))),
@@ -163,7 +210,8 @@ def main():
     sig = np.where(pc >= thr, 1, np.where(pc <= 1 - thr, -1, 0))
     m = sig != 0
     log(f"test bets with locked threshold {thr}: {int(m.sum())} "
-        f"of {len(sig)} (acc {float((pred[m] >= .5) == y[m]).mean():.4f})")
+        f"of {len(sig)} "
+        f"(acc {float(((pred[m] >= .5) == y[m]).mean()):.4f})")
 
     print(f"  {'k bars':>7} {'n':>5} {'gross':>9} "
           + " ".join(f"net@{co*1e4:4.1f}bps".rjust(11) for co in COSTS_SIDE))
@@ -178,7 +226,8 @@ def main():
             row["nets"][f"{co}"] = net
             cells.append(f"{net*100:+10.2f}%")
         res["horizons"].append(row)
-        print(f"  {k:7d} {n:5d} {gross*100:+8.2f}% " + " ".join(cells))
+        mark = "  <== k dipilih di validasi" if k == k_best else ""
+        print(f"  {k:7d} {n:5d} {gross*100:+8.2f}% " + " ".join(cells) + mark)
 
     with open(f"{OUT}/validation.json", "w") as fh:
         json.dump(res, fh, indent=1)

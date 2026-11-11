@@ -290,6 +290,37 @@ inilah hipotesis yang harus diverifikasi. **Peringatan jujur:** threshold ini
 dipilih *setelah* melihat hasil test → risiko overfitting ke test; pada run
 resmi, pilih threshold di data validasi (2021–2022) lalu kunci sebelum 2023.
 
+### Validasi jujur + hasil net positif (`validate_stage4.py`, baru)
+
+Sebelumnya threshold dipilih *setelah* melihat test (bias). Script ini
+memindahkan **semua** keputusan ke validasi 2021–2022 (1.642 window), lalu
+menyentuh 2023 tepat sekali:
+
+| keputusan | dipilih di validasi | hasil |
+|---|---|---|
+| Platt scaling (a=0,7163, b=−0,1828) | ECE 0,0838 → **0,0607** | test ECE 0,1077 → **0,0828** |
+| threshold taruhan | **0,75** (net +0,25% @1,5bps, n=189) | — |
+| horizon holding | **48 bar** (gross +7,89%, net **+2,22%** @1,5bps) | — |
+
+Tabel horizon di **validasi** (untuk pemilihan) vs **test** (hasil akhir):
+
+| k bar | val gross | val net@1,5bps | test gross | **test net@1,5bps** | test net@0,5bps | test net@3,0bps |
+|---|---|---|---|---|---|---|
+| 1 | +5,92% | +0,25% | +2,08% | −0,53% | +1,21% | −3,14% |
+| 3 | +4,82% | −0,85% | +1,75% | −0,86% | +0,88% | −3,47% |
+| 6 | +4,90% | −0,77% | +0,64% | −1,97% | −0,23% | −4,58% |
+| 12 | +1,75% | −3,92% | +0,39% | −2,22% | −0,48% | −4,83% |
+| 24 | +2,68% | −2,99% | +1,64% | −0,97% | +0,77% | −3,58% |
+| **48** ← dipilih | **+7,89%** | **+2,22%** | **+2,89%** | **+0,28%** ✅ | **+2,02%** ✅ | −2,33% |
+
+**Hasil test (semua keputusan sudah terkunci): 87 taruhan, akurasi 89,66%,
+gross +2,89%, net +0,28% di 1,5 bps/side dan +2,02% di 0,5 bps/side.**
+Ini pertama kali strategi **net positif** dengan protokol yang tidak curang.
+
+Peringatan jujur: n=87 kecil (CI akurasi ±±6%), biaya masih asumsi (slippage
+& komisi broker belum masuk), dan 0,5 bps/side hanya masuk akal di spread
+ECN paling ketat. Angka lengkap: `results/finetune/validation.json`.
+
 ### Knob untuk mesin kecil (defaults = konfigurasi asli Colab/GPU)
 
 `stage4_finetune.py` bisa dijalankan di CPU tanpa mengubah kode lewat env var:
@@ -337,7 +368,8 @@ python -u backtest_stage4.py
 3. ~~Backtest biaya-nyata (cost-aware) dari prediksi arah~~ — **sudah ada**:
    `backtest_stage4.py` (lihat tabel di atas); tinggal dijalankan ulang dengan
    konfigurasi GPU penuh.
-4. **Kalibrasi + pemilihan threshold di data validasi** (2021–2022), kunci
-   sebelum menyentuh 2023 — sekarang threshold sweep masih post-hoc di test.
-   Sumber biaya nyata juga harus diukur (spread komposit broker) alih-alih
-   asumsi 1,5 bps/side.
+4. **Kalibrasi + pemilihan threshold/horizon di data validasi** — **sudah
+   dilakukan** oleh `validate_stage4.py` (Platt + threshold 0,75 + horizon
+   48 bar dipilih di 2021–2022, test 2023 disentuh sekali → net +0,28%).
+   Yang masih kurang: **ukur biaya nyata** dari spread komposit broker
+   (sekarang masih asumsi 0,5/1,5/3,0 bps/side) dan perbesar n (87 taruhan).
