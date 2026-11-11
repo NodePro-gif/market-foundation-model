@@ -84,7 +84,17 @@ bisa menampilkannya lagi.
 | jam | tahap | apa yang terjadi | hasil |
 |---|---|---|---|
 | 18:20 | **baru** | `walkforward_stage4.py` — 3 fold jujur (pilih Platt+thr+horizon di 2 tahun sebelum test year) | selesai 717 dtk: **agregat 116 taruhan, acc 0,9052, z=+8,73**, gross +2,49%, **net@0,5bps +1,33%** ✅ / net@1,5bps −0,99% |
-| 18:32 | **baru** | `probe_transfer.py` — bekukan backbone, latih kepala di 16 simbol 2015–2022, uji held-out 2023 | sedang berjalan (±40 menit) |
+| 18:32 | **baru** | `probe_transfer.py` — bekukan backbone, latih kepala di 16 simbol 2015–2022, uji held-out 2023 | selesai 1966 dtk: **held-out NIKKEI AUC 0,4838 → 0,7407 (+0,2569)**, BRENT 0,5293 → 0,6320, EURGBP 0,5222 → 0,6005 — **transfer lintas-aset TERBUKTI BISA** |
+
+### Temuan probe transfer (inti — solusi "held-out ≈ acak" TERATASI)
+
+- **Held-out naik jauh di atas acak**: NIKKEI 0,4838 → **0,7407**, BRENT
+  0,5293 → **0,6320**, EURGBP 0,5222 → **0,6005** (acc juga: 0,478 → 0,621).
+- **Penyebabnya terbukti**: bukan backbone yang gagal transfer, tapi **kepala
+  yang cuma dilatih di XAUUSD**. Backbone dibekukan pun (0 parameter diubah)
+  sudah cukup → representasi pretraining memang lintas-aset.
+- XAUUSD tidak dikorbankan: 0,6792 → 0,6913.
+- Latihan ≤2022, test 2023 → tanpa kebocoran waktu; n 696–815 per simbol.
 
 ### Temuan walk-forward (inti)
 
@@ -101,9 +111,11 @@ bisa menampilkannya lagi.
 ## Status akhir sesi ini
 
 - Semua tahap (stage1 → stage2 → verify → stage4 ×2 → backtest → validate →
-  walk-forward) **selesai tanpa error**; log tersimpan di `logs/` (di-ignore git).
-- **Sedang berjalan**: `probe_transfer.py` (multi-symbol heads, ±40 menit) →
-  hasil mengisi `results/finetune/transfer.json` dan bagian atas catatan ini.
+  walk-forward → probe transfer) **selesai tanpa error**; log di `logs/`
+  (di-ignore git).
+- **Dua masalah utama teratasi**: kalibrasi (Platt) & pertanyaan transfer
+  lintas-aset (kepala multi-simbol → held-out 0,48 → 0,74 AUC). Sisa: edge
+  tipis terhadap biaya 1,5 bps/side (butuh biaya rendah / backbone lebih kuat).
 - Dashboard: `python monitor.py`.
-- Push: commit `6d520c1`, `664811c`, `b47c692`, `8e6fab1` sudah di
-  `origin/main`; walk-forward + probe menyusul di commit berikutnya.
+- Push: commit `6d520c1`, `664811c`, `b47c692`, `8e6fab1`, `b8774a5` sudah di
+  `origin/main`; hasil probe transfer menyusul di commit berikutnya.

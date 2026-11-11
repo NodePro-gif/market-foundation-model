@@ -238,8 +238,10 @@ menguji generalisasi lintas-aset (run 2 epoch):
 | BRENT | 0,5144 | 0,5293 | 0,2798 | 348 |
 | EURGBP | 0,5196 | 0,5222 | 0,2800 | 408 |
 
-Jujur: di simbol held-out model ≈ acak → **transfer lintas-aset belum terbukti**;
+Jujur: di simbol held-out model **dengan kepala XAUUSD-only** ≈ acak →
 keunggulan hanya muncul di XAUUSD (simbol yang memang dilatih saat fine-tune).
+**Sudah ditemukan solusinya** — lihat "Probe transfer lintas-aset" di bawah:
+kepala dilatih di 16 simbol → NIKKEI AUC 0,4838 → **0,7407**.
 
 ### Backtest biaya-nyata (`backtest_stage4.py`, baru)
 
@@ -347,6 +349,40 @@ menjalankan **3 fold jujur**: tiap fold memilih Platt + threshold + horizon di
 
 Angka lengkap: `results/finetune/walkforward.json`, log `logs/walkforward.log`.
 
+### Probe transfer lintas-aset (`probe_transfer.py`, baru)
+
+**Masalah**: kepala stage4 hanya dilatih di XAUUSD → held-out NIKKEI/BRENT/
+EURGBP ≈ acak (AUC 0,484 / 0,529 / 0,522).
+
+**Eksperimen**: backbone pretraining **dibekukan** (hanya forward, murah),
+kepala dir/vol/quantile dilatih di **16 simbol** 2015–2022 (5.163 window,
+stride 1536, 2 epoch, lr 2e-3), lalu dievaluasi di simbol held-out 2023.
+
+| simbol (2023) | AUC kepala XAUUSD-only | **AUC multi-simbol** | Δ | acc lama → baru |
+|---|---|---|---|---|
+| NIKKEI | 0,4838 | **0,7407** | **+0,2569** | 0,4780 → **0,6209** |
+| BRENT | 0,5293 | **0,6320** | +0,1027 | 0,5144 → **0,5733** |
+| EURGBP | 0,5222 | **0,6005** | +0,0783 | 0,5196 → **0,5656** |
+| XAUUSD (bukan held-out, pembanding) | 0,6792 | 0,6913 | +0,0121 | 0,5872 → 0,6051 |
+
+**Kesimpulan:**
+
+1. **Transfer lintas-aset BISA** — hipotesis "kepala belajar pemetaan
+   khas-XAUUSD" **terbukti benar**. Cukup melatih kepala di banyak simbol,
+   held-out langsung naik jauh di atas acak (NIKKEI 0,48 → **0,74**).
+2. **Representasi pretraining memang lintas-aset**: backbone dibekukan
+   (tak ada parameter yang diubah) saja sudah cukup — bukti bahwa tokenisasi +
+   embedding hasil pretraining menyimpan sinyal umum antar-pasar.
+3. XAUUSD sendiri tidak turun (0,679 → 0,691) → melatih multi-simbol tidak
+   mengorbankan simbol asal; justru naik sedikit.
+4. Catatan: NIKKEI/BRENT/EURGBP 2023 adalah **test**, sedangkan latihan
+   memakai tahun ≤2022 → tidak ada kebocoran waktu. n besar (696–815) jadi
+   beda AUC ini tidak mungkin kebetulan.
+
+**Langkah lanjutan yang jelas**: gabungkan probe ini dengan protokol jujur
+(Platt + threshold terkunci + walk-forward) untuk menghasilkan taruhan di 4
+simbol, bukan cuma XAUUSD. Angka lengkap: `results/finetune/transfer.json`.
+
 ### Knob untuk mesin kecil (defaults = konfigurasi asli Colab/GPU)
 
 `stage4_finetune.py` bisa dijalankan di CPU tanpa mengubah kode lewat env var:
@@ -389,13 +425,18 @@ python -u backtest_stage4.py
 1. **Fine-tune penuh di GPU (Colab T4)** dengan konfigurasi asli
    (`ST4_EPOCHS=3 ST4_STRIDE=4 ST4_BATCH=256`) — 15.087+ window, hasil
    resmi yang bisa dibandingkan dengan baseline GRU/MLP.
-2. Uji transfer lintas-aset: fine-tune leave-one-symbol-out, atau tambah
-   simbol held-out ke pretraining lalu ukur lagi.
+2. ~~Uji transfer lintas-aset~~ — **sudah terbukti bisa**: `probe_transfer.py`
+   (kepala multi-simbol, backbone beku) → held-out NIKKEI AUC 0,48 → **0,74**,
+   BRENT 0,53 → 0,63, EURGBP 0,52 → 0,60. Lanjutannya: **gabungkan dengan
+   protokol jujur** (Platt + threshold terkunci + walk-forward) untuk
+   menghasilkan taruhan out-of-sample di 4 simbol, bukan cuma XAUUSD.
 3. ~~Backtest biaya-nyata (cost-aware) dari prediksi arah~~ — **sudah ada**:
    `backtest_stage4.py` (lihat tabel di atas); tinggal dijalankan ulang dengan
    konfigurasi GPU penuh.
 4. **Kalibrasi + pemilihan threshold/horizon di data validasi** — **sudah
    dilakukan** oleh `validate_stage4.py` (Platt + threshold 0,75 + horizon
-   48 bar dipilih di 2021–2022, test 2023 disentuh sekali → net +0,28%).
-   Yang masih kurang: **ukur biaya nyata** dari spread komposit broker
-   (sekarang masih asumsi 0,5/1,5/3,0 bps/side) dan perbesar n (87 taruhan).
+   48 bar dipilih di 2021–2022, test 2023 disentuh sekali → net +0,28%) dan
+   diperluas ke 3 fold walk-forward (`walkforward_stage4.py`, 116 taruhan,
+   acc 0,905, z +8,73, net +1,33% @0,5bps). Yang masih kurang: **ukur biaya
+   nyata** dari spread komposit broker (sekarang masih asumsi) dan menaikkan
+   gross per taruhan (pretraining 6000 steps + fine-tune penuh).

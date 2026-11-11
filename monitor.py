@@ -118,6 +118,22 @@ def main():
                 for k, val in h["nets"].items())
             print(f"    horizon {h['horizon']:>2} bar  n={h['n']:>4} "
                   f"gross={h['gross_total']*100:+.2f}%  {nets}")
+    tr = os.path.join(OUT, "transfer.json")
+    if os.path.exists(tr):
+        d = json.load(open(tr))
+        print(f"  transfer.json         {len(d.get('train', {}).get('symbols', []))} simbol "
+              f"latih, {d.get('train', {}).get('windows')} window "
+              f"(backbone beku)")
+        ref = {}
+        mp = os.path.join(OUT, "metrics.json")
+        if os.path.exists(mp):
+            ref = json.load(open(mp)).get("held_out", {})
+        for sym, v in (d.get("held_out") or {}).items():
+            old = ref.get(sym, {}).get("auc")
+            delta = (f" (AUC {old:.4f} -> {v['auc']:.4f} "
+                     f"{v['auc']-old:+.4f})") if old else ""
+            print(f"    held-out {sym:8s} acc={v['acc']:.4f} "
+                  f"auc={v['auc']:.4f}{delta}")
     if not any(os.path.exists(p) for p in (m, b, v)):
         print("  (belum ada hasil)")
 
