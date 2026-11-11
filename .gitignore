@@ -1,0 +1,16 @@
+# --- raw / regenerated data (downloadable again, too big for git) ---
+corpus/
+npz/
+mkt/
+parts/
+*.zip
+gold_price.csv.gz
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
