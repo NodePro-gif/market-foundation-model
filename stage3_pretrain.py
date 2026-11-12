@@ -24,19 +24,18 @@ CKPT = "/content/ckpt" if IS_COLAB else r"D:\xauusd-dl\ckpt"
 LOG = "/content/pretrain_log.json"
 
 # ------------------------------------------------------------------ config
-CTX = 512
-BATCH = 64
-LR = 3e-4
-WARMUP = 300
-MAX_STEPS = 6000          # ~45-60 min on T4 with 12M params
-CKPT_EVERY = 1000
-EVAL_EVERY = 250
-SEED = 42
-N_LAYER = 6
-N_HEAD = 8
-N_EMBD = 384              # 6 * 384^2 * 12 ~= 10.6M + heads/embeds ~= 12M
-DROPOUT = 0.1
-
+CTX = int(os.getenv("PRETRAIN_CTX", "512"))
+BATCH = int(os.getenv("PRETRAIN_BATCH", "48"))
+LR = float(os.getenv("PRETRAIN_LR", "3e-4"))
+WARMUP = int(os.getenv("PRETRAIN_WARMUP", "300"))
+MAX_STEPS = int(os.getenv("PRETRAIN_MAX_STEPS", "6000"))
+CKPT_EVERY = int(os.getenv("PRETRAIN_CKPT_EVERY", "250"))
+EVAL_EVERY = int(os.getenv("PRETRAIN_EVAL_EVERY", "250"))
+SEED = int(os.getenv("PRETRAIN_SEED", "42"))
+N_LAYER = int(os.getenv("PRETRAIN_LAYERS", "6"))
+N_HEAD = int(os.getenv("PRETRAIN_HEADS", "8"))
+N_EMBD = int(os.getenv("PRETRAIN_EMBD", "384"))
+DROPOUT = float(os.getenv("PRETRAIN_DROPOUT", "0.1"))
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
