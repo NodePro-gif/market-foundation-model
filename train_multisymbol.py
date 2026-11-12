@@ -91,6 +91,20 @@ def evaluate(model,loader):
     except Exception: auc=float("nan")
     return {"loss":total/max(n,1),"acc":float(((p>=.5)==y).mean()),"auc":auc,"brier":float(np.mean((p-y)**2)),"n":int(n)}
 
+@torch.no_grad()
+def collect_predictions(model,loader,path):
+    model.eval(); probs=[]; labels=[]; quantiles=[]; symbols=[]; bars=[]
+    for ids,yd,yv,yq,sym,b in loader:
+        ids=ids.to(DEVICE)
+        with torch.autocast("cuda",dtype=torch.float16,enabled=DEVICE.type=="cuda"):
+            pd,pv,pq=model(ids)
+        probs.append(torch.sigmoid(pd).float().cpu().numpy())
+        labels.append(yd.numpy() if torch.is_tensor(yd) else np.asarray(yd))
+        quantiles.append(pq.float().cpu().numpy())
+        symbols.extend(list(sym)); bars.extend(b.numpy().tolist())
+    np.savez_compressed(path,p=np.concatenate(probs),y=np.concatenate(labels),
+        q=np.concatenate(quantiles),symbols=np.asarray(symbols),bars=np.asarray(bars,dtype=np.int64))
+    log(f"saved predictions: {path}")
 def main():
     log(f"device={DEVICE}; train assets={len(TRAIN_SYMBOLS)}; held-out={HELD_SYMBOLS}")
     if DEVICE.type!="cuda": log("WARNING: no CUDA GPU detected")
@@ -129,6 +143,8 @@ def main():
             if bad>=PATIENCE: log("early stopping"); break
     model.load_state_dict(torch.load(f"{OUT}/best.pt",map_location=DEVICE,weights_only=True))
     results={"validation":evaluate(model,vl),"test_2023":evaluate(model,el),"heldout_zero_shot":{}}
+    collect_predictions(model,vl,f"{OUT}/validation_predictions.npz")
+    collect_predictions(model,el,f"{OUT}/test_predictions.npz")
     for sym,ds in held: results["heldout_zero_shot"][sym]=evaluate(model,DataLoader(ds,batch_size=BATCH*2,shuffle=False))
     results["history"]=hist; results["config"]={"train_symbols":TRAIN_SYMBOLS,"heldout_symbols":HELD_SYMBOLS,"train_years":list(TRAIN_YEARS),"validation_years":VAL_YEARS,"test_years":TEST_YEARS,"stride":STRIDE,"batch":BATCH,"epochs":EPOCHS,"device":str(DEVICE)}
     with open(f"{OUT}/metrics.json","w") as f: json.dump(results,f,indent=2,allow_nan=True)
