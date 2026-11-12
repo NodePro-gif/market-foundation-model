@@ -8,8 +8,8 @@ from torch.utils.data import Dataset,DataLoader
 import stage3_pretrain as s3
 
 SEED=int(os.getenv("ADAPT_SEED","42"))
-TRAIN_SYMBOLS=os.getenv("ADAPT_TRAIN_SYMBOLS","EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF,EURGBP,GBPJPY,XAUUSD,XAGUSD,BTCUSD,ETHUSD,SP500,NQ,DJ,DAX,FTSE").split(",")
-HELD_SYMBOLS=os.getenv("ADAPT_HELD_SYMBOLS","NIKKEI,BRENT,WTI").split(",")
+TRAIN_SYMBOLS=os.getenv("ADAPT_TRAIN_SYMBOLS","EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF,GBPJPY,XAUUSD,XAGUSD,BTCUSD,ETHUSD,SP500,NQ,DJ,DAX,FTSE").split(",")
+HELD_SYMBOLS=os.getenv("ADAPT_HELD_SYMBOLS","NIKKEI,BRENT,EURGBP").split(",")
 TRAIN_YEARS=range(2015,2022); VAL_YEARS=[2022]; TEST_YEARS=[2023]
 OUT=os.getenv("ADAPT_OUT","/content/adaptive_results")
 EPOCHS=int(os.getenv("ADAPT_EPOCHS","8")); BATCH=int(os.getenv("ADAPT_BATCH","48"))
@@ -40,7 +40,7 @@ class MultiAssetDS(Dataset):
             valid &= (tok_of>=s3.CTX-6)&(tok_of<len(tok)-1)
             # Purge final 24 hours of each year to prevent longest forward label crossing split.
             for y in years:
-                end=int((y+1-1970)*31557600)
+                end=int(np.datetime64(f"{y+1}-01-01T00:00:00").astype("datetime64[s]").astype(np.int64))
                 valid &= ~((yr==y)&(ts>=end-86400))
             bars=np.flatnonzero(valid)[::stride]
             self.tokens[sym]=tok; self.labels[sym]=lab
