@@ -245,8 +245,8 @@ def main():
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
 
     # 2023 held out of pretraining (year filter), held-out symbols excluded
-    train_ds = MarketLMSmart(split_years=list(range(2015, 2023)))
-    val_ds = MarketLMSmart(split_years=[2023])
+    train_ds = MarketLMSmart(split_years=list(range(2015, 2022)))
+    val_ds = MarketLMSmart(split_years=[2022])
     if len(train_ds) == 0:
         raise SystemExit("empty train dataset - check MKT files")
 
