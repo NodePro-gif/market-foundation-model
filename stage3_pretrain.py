@@ -136,8 +136,26 @@ class MarketLMSmart(Dataset):
                         for off in offs:
                             self.items.append((sym, tf, int(off), None, None))
                     else:
-                        for off in range(0, max(len(tok) - 5, 1), self.stride):
-                            self.items.append((sym, tf, off, None, None))
+                        # Never silently include an unfiltered series: derive exact
+                        # calendar years from parsed OHLC timestamps when available.
+                        raw_p = os.path.join(os.path.dirname(MKT), "npz", f"{sym}_{tf}.npz")
+                        if not os.path.exists(raw_p):
+                            log(f"skip {sym}/{tf}: no year map or parsed timestamps")
+                            continue
+                        raw = np.load(raw_p)
+                        raw_ts = raw["ts"]
+                        raw_years = (raw_ts.astype("datetime64[s]").astype("datetime64[Y]").astype(np.int64) + 1970).astype(np.int32)
+                        m = min(len(raw_years), int(bar_of_tok[-1]) + 1 if len(bar_of_tok) else 0)
+                        n_tok = min(len(tok), len(bar_of_tok))
+                        if m <= 0 or n_tok <= 0:
+                            continue
+                        last_tok = np.minimum(np.arange(n_tok) + CTX - 6, n_tok - 1)
+                        y0 = raw_years[bar_of_tok[:n_tok]]
+                        y1 = raw_years[np.minimum(bar_of_tok[last_tok], m - 1)]
+                        ok = np.isin(y0, list(years_set)) & np.isin(y1, list(years_set))
+                        offs = np.flatnonzero(ok)[:: self.stride]
+                        for off in offs:
+                            self.items.append((sym, tf, int(off), None, None))
         log(f"MarketLMSmart {min(years_set)}-{max(years_set)}: "
             f"{len(self.items):,} windows")
 
