@@ -33,7 +33,7 @@ class MultiAssetDS(Dataset):
             tok_of=np.full(n,-1,np.int64); tok_of[bot]=np.arange(len(bot))
             ix=np.maximum.accumulate(np.where(tok_of>=0,np.arange(n),0))
             tok_of=np.where(tok_of>=0,tok_of,ix)
-            ts=lab["ts"][:n]; yr=(ts//31557600+1970).astype(np.int32)
+            ts=lab["ts"][:n]; yr=(ts.astype("datetime64[s]").astype("datetime64[Y]").astype(np.int64)+1970).astype(np.int32)
             valid=np.isin(yr,years)
             valid &= (lab["nxt"][:n]<2)&(lab["volb"][:n]<4)&(lab["regime"][:n]<6)
             valid &= np.isfinite(lab["fwd12"][:n])&np.isfinite(lab["fwd48"][:n])&np.isfinite(lab["fwd288"][:n])
