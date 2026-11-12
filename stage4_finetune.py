@@ -97,6 +97,7 @@ class FinetuneDS(Dataset):
         self.starts = self.ends - (s3.CTX - 6)   # chunk len = CTX-5
         self.bars = offs
         self.lab = lab
+        self.sym = sym
         self.n = n
         log(f"FinetuneDS {sym} years={sorted(set(years_arr[offs].tolist()))} "
             f"windows={len(self.bars):,}")
@@ -106,13 +107,13 @@ class FinetuneDS(Dataset):
 
     def __getitem__(self, i):
         st, en = int(self.starts[i]), int(self.ends[i])
-        tok = _tokens(TARGET_SYM)
+        tok = _tokens(self.sym)
         b = int(self.bars[i])
         reg = int(self.lab["regime"][b])
         sess = int(self.lab["sess"][b])
         ids = np.empty(s3.CTX, dtype=np.int64)
         ids[0] = s3.BOS
-        ids[1] = s3.SYM0 + s3.SYM_ID[TARGET_SYM]
+        ids[1] = s3.SYM0 + s3.SYM_ID[self.sym]
         ids[2] = s3.TF0 + s3.TF_ID["M5"]
         ids[3] = s3.REG0 + reg
         ids[4] = s3.SESS0 + sess
