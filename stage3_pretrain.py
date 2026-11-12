@@ -5,7 +5,7 @@ Reads tokenized streams from /content/mkt, builds packed sequences with
 context tokens [SYM][TF][REG][SESS] prefix, trains a GPT-style decoder
 with AMP fp16, periodic checkpointing to /content/ckpt.
 
-Held-out rule: 2023 tokens and HELD_OUT symbols are excluded from pretraining.
+Held-out rule: 2022 is validation, 2023 is untouched final test, and HELD_OUT symbols are excluded.
 """
 
 import json
@@ -24,19 +24,18 @@ CKPT = "/content/ckpt" if IS_COLAB else r"D:\xauusd-dl\ckpt"
 LOG = "/content/pretrain_log.json"
 
 # ------------------------------------------------------------------ config
-CTX = 512
-BATCH = 64
-LR = 3e-4
-WARMUP = 300
-MAX_STEPS = 6000          # ~45-60 min on T4 with 12M params
-CKPT_EVERY = 1000
-EVAL_EVERY = 250
-SEED = 42
-N_LAYER = 6
-N_HEAD = 8
-N_EMBD = 384              # 6 * 384^2 * 12 ~= 10.6M + heads/embeds ~= 12M
-DROPOUT = 0.1
-
+CTX = int(os.getenv("PRETRAIN_CTX", "512"))
+BATCH = int(os.getenv("PRETRAIN_BATCH", "48"))
+LR = float(os.getenv("PRETRAIN_LR", "3e-4"))
+WARMUP = int(os.getenv("PRETRAIN_WARMUP", "300"))
+MAX_STEPS = int(os.getenv("PRETRAIN_MAX_STEPS", "6000"))
+CKPT_EVERY = int(os.getenv("PRETRAIN_CKPT_EVERY", "250"))
+EVAL_EVERY = int(os.getenv("PRETRAIN_EVAL_EVERY", "250"))
+SEED = int(os.getenv("PRETRAIN_SEED", "42"))
+N_LAYER = int(os.getenv("PRETRAIN_LAYERS", "6"))
+N_HEAD = int(os.getenv("PRETRAIN_HEADS", "8"))
+N_EMBD = int(os.getenv("PRETRAIN_EMBD", "384"))
+DROPOUT = float(os.getenv("PRETRAIN_DROPOUT", "0.1"))
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -109,7 +108,7 @@ class MarketLMSmart(Dataset):
                 if lab is not None and tf == "M5":
                     ts = lab["ts"]
                     n = min(len(ts), int(bar_of_tok[-1]) + 1)
-                    years = (ts[:n] // 31557600 + 1970).astype(np.int32)
+                    years = (ts[:n].astype("datetime64[s]").astype("datetime64[Y]").astype(np.int64) + 1970).astype(np.int32)
                     regime = lab["regime"][:n]
                     sess = lab["sess"][:n]
                     tok = tok[:int(np.searchsorted(bar_of_tok, n, "right"))]
@@ -137,8 +136,26 @@ class MarketLMSmart(Dataset):
                         for off in offs:
                             self.items.append((sym, tf, int(off), None, None))
                     else:
-                        for off in range(0, max(len(tok) - 5, 1), self.stride):
-                            self.items.append((sym, tf, off, None, None))
+                        # Never silently include an unfiltered series: derive exact
+                        # calendar years from parsed OHLC timestamps when available.
+                        raw_p = os.path.join(os.path.dirname(MKT), "npz", f"{sym}_{tf}.npz")
+                        if not os.path.exists(raw_p):
+                            log(f"skip {sym}/{tf}: no year map or parsed timestamps")
+                            continue
+                        raw = np.load(raw_p)
+                        raw_ts = raw["ts"]
+                        raw_years = (raw_ts.astype("datetime64[s]").astype("datetime64[Y]").astype(np.int64) + 1970).astype(np.int32)
+                        m = min(len(raw_years), int(bar_of_tok[-1]) + 1 if len(bar_of_tok) else 0)
+                        n_tok = min(len(tok), len(bar_of_tok))
+                        if m <= 0 or n_tok <= 0:
+                            continue
+                        last_tok = np.minimum(np.arange(n_tok) + CTX - 6, n_tok - 1)
+                        y0 = raw_years[bar_of_tok[:n_tok]]
+                        y1 = raw_years[np.minimum(bar_of_tok[last_tok], m - 1)]
+                        ok = np.isin(y0, list(years_set)) & np.isin(y1, list(years_set))
+                        offs = np.flatnonzero(ok)[:: self.stride]
+                        for off in offs:
+                            self.items.append((sym, tf, int(off), None, None))
         log(f"MarketLMSmart {min(years_set)}-{max(years_set)}: "
             f"{len(self.items):,} windows")
 
@@ -246,8 +263,8 @@ def main():
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
 
     # 2023 held out of pretraining (year filter), held-out symbols excluded
-    train_ds = MarketLMSmart(split_years=list(range(2015, 2023)))
-    val_ds = MarketLMSmart(split_years=[2023])
+    train_ds = MarketLMSmart(split_years=list(range(2015, 2022)))
+    val_ds = MarketLMSmart(split_years=[2022])
     if len(train_ds) == 0:
         raise SystemExit("empty train dataset - check MKT files")
 
