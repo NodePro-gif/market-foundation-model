@@ -5,7 +5,7 @@ Reads tokenized streams from /content/mkt, builds packed sequences with
 context tokens [SYM][TF][REG][SESS] prefix, trains a GPT-style decoder
 with AMP fp16, periodic checkpointing to /content/ckpt.
 
-Held-out rule: 2023 tokens and HELD_OUT symbols are excluded from pretraining.
+Held-out rule: 2022 is validation, 2023 is untouched final test, and HELD_OUT symbols are excluded.
 """
 
 import json
@@ -108,7 +108,7 @@ class MarketLMSmart(Dataset):
                 if lab is not None and tf == "M5":
                     ts = lab["ts"]
                     n = min(len(ts), int(bar_of_tok[-1]) + 1)
-                    years = (ts[:n] // 31557600 + 1970).astype(np.int32)
+                    years = (ts[:n].astype("datetime64[s]").astype("datetime64[Y]").astype(np.int64) + 1970).astype(np.int32)
                     regime = lab["regime"][:n]
                     sess = lab["sess"][:n]
                     tok = tok[:int(np.searchsorted(bar_of_tok, n, "right"))]
