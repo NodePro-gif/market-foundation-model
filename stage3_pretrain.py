@@ -8,6 +8,7 @@ with AMP fp16, periodic checkpointing to /content/ckpt.
 Held-out rule: 2023 tokens and HELD_OUT symbols are excluded from pretraining.
 """
 
+import hashlib
 import json
 import math
 import os
@@ -25,13 +26,16 @@ LOG = os.path.join(CKPT, "pretrain_log.json")
 
 # ------------------------------------------------------------------ config
 CTX = 512
-BATCH = 64
-LR = 3e-4
-WARMUP = 300
-MAX_STEPS = 6000          # ~45-60 min on T4 with 12M params
-CKPT_EVERY = 1000
-EVAL_EVERY = 250
-SEED = 42
+BATCH = int(os.environ.get("PRETRAIN_BATCH", "32"))
+ACCUM_STEPS = max(1, int(os.environ.get("PRETRAIN_ACCUM", "2")))
+LR = float(os.environ.get("PRETRAIN_LR", "3e-4"))
+WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "300"))
+MAX_STEPS = int(os.environ.get("PRETRAIN_STEPS", "6000"))
+CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "500"))
+EVAL_EVERY = int(os.environ.get("PRETRAIN_EVAL_EVERY", "250"))
+NUM_WORKERS = int(os.environ.get("PRETRAIN_WORKERS", "2"))
+RESUME = os.environ.get("PRETRAIN_RESUME", "0") == "1"
+SEED = int(os.environ.get("PRETRAIN_SEED", "42"))
 N_LAYER = 6
 N_HEAD = 8
 N_EMBD = 384              # 6 * 384^2 * 12 ~= 10.6M + heads/embeds ~= 12M
@@ -65,6 +69,32 @@ def years_from_ts(ts):
     """Convert Unix-second timestamps to exact UTC calendar years."""
     return (np.asarray(ts, dtype=np.int64).astype("datetime64[s]")
             .astype("datetime64[Y]").astype(np.int32) + 1970)
+
+
+def tokenizer_fingerprint():
+    """Bind a checkpoint to the exact tokenizer artifacts used to train it."""
+    digest = hashlib.sha256()
+    for name in ("vocab.json", "bpe.npz"):
+        path = os.path.join(MKT, name)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"missing tokenizer artifact: {path}")
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def atomic_json(path, payload):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def atomic_torch_save(payload, path):
+    tmp = path + ".tmp"
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
 SYM_ID = {s: i for i, s in enumerate(SYMBOLS)}
 TF_ID = {t: i for i, t in enumerate(TF_LIST)}
 
@@ -263,8 +293,8 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
 
-    # Fit on 2015-2020, select the language-model checkpoint on 2021-2022.
-    # 2023 remains untouched by tokenizer fitting and pretraining.
+    # Fit on 2015-2020 and select the language-model checkpoint on 2021.
+    # 2022 is reserved for calibration; 2023 remains the final untouched test.
     train_ds = MarketLMSmart(split_years=list(range(2015, 2021)))
     val_ds = MarketLMSmart(split_years=[2021])
     if len(train_ds) == 0 or len(val_ds) == 0:
@@ -273,10 +303,17 @@ def main():
             "check MKT files and token-year maps"
         )
 
+    loader_kwargs = dict(num_workers=NUM_WORKERS,
+                         pin_memory=DEVICE.type == "cuda")
+    if NUM_WORKERS > 0:
+        loader_kwargs["persistent_workers"] = True
+    generator = torch.Generator().manual_seed(SEED)
     train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
-                          num_workers=0, drop_last=True, pin_memory=True)
+                          drop_last=False, generator=generator, **loader_kwargs)
     val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,
-                        num_workers=0, drop_last=True)
+                        drop_last=False, **loader_kwargs)
+    if len(train_dl) == 0 or len(val_dl) == 0:
+        raise SystemExit("train/validation loader is empty; reduce batch size or check data")
 
     opt = torch.optim.AdamW(model.parameters(), lr=LR,
                             betas=(0.9, 0.95), weight_decay=0.1)
@@ -292,6 +329,24 @@ def main():
     step = 0
     best_val = float("inf")
     hist = []
+    manifest_path = os.path.join(CKPT, "best_manifest.json")
+    fingerprint = tokenizer_fingerprint()
+    if RESUME and os.path.isfile(os.path.join(CKPT, "resume.pt")):
+        state = torch.load(os.path.join(CKPT, "resume.pt"),
+                           map_location=DEVICE, weights_only=False)
+        if state.get("tokenizer_fingerprint") != fingerprint:
+            raise RuntimeError("resume checkpoint tokenizer fingerprint mismatch")
+        model.load_state_dict(state["model"])
+        opt.load_state_dict(state["optimizer"])
+        scaler.load_state_dict(state["scaler"])
+        step = int(state["step"])
+        best_val = float(state["best_val"])
+        hist = state.get("history", [])
+        torch.set_rng_state(state["torch_rng"])
+        np.random.set_state(state["numpy_rng"])
+        if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
+            torch.cuda.set_rng_state_all(state["cuda_rng"])
+        log(f"resumed from step {step}, best_val={best_val:.5f}")
 
     def evaluate():
         model.eval()
@@ -302,29 +357,37 @@ def main():
                     break
                 xb = batch.to(DEVICE, non_blocking=True)
                 _, loss = model(xb, xb)
-                tot += loss.item() * len(xb)
-                n += len(xb)
+                valid_tokens = int((xb[:, 1:] != PAD).sum().item())
+                tot += loss.item() * valid_tokens
+                n += valid_tokens
         model.train()
-        return tot / max(n, 1)
+        if n == 0:
+            raise RuntimeError("validation produced zero non-padding targets")
+        return tot / n
 
     model.train()
+    opt.zero_grad(set_to_none=True)
     while step < MAX_STEPS:
-        for batch in train_dl:
+        for i, batch in enumerate(train_dl):
             if step >= MAX_STEPS:
                 break
             lr = lr_at(step)
             for g in opt.param_groups:
                 g["lr"] = lr
             xb = batch.to(DEVICE, non_blocking=True)
-            with torch.autocast("cuda", dtype=torch.float16,
+            group_start = (i // ACCUM_STEPS) * ACCUM_STEPS
+            group_size = min(ACCUM_STEPS, len(train_dl) - group_start)
+            with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
                                 enabled=DEVICE.type == "cuda"):
                 _, loss = model(xb, xb)
-            opt.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(opt)
-            scaler.update()
+            scaler.scale(loss / group_size).backward()
+            update_now = ((i + 1) % ACCUM_STEPS == 0) or (i + 1 == len(train_dl))
+            if update_now:
+                scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
 
             if step % 10 == 0:
                 log(f"step {step:>5}  loss {loss.item():.4f}  "
@@ -336,16 +399,30 @@ def main():
                     f"ppl={math.exp(min(vl, 20)):.1f}")
                 if vl < best_val:
                     best_val = vl
-                    torch.save(model.state_dict(), f"{CKPT}/best.pt")
-                    log(f"  new best val {vl:.4f} -> best.pt")
-            if step % CKPT_EVERY == 0 and step > 0:
-                torch.save(model.state_dict(), f"{CKPT}/step{step}.pt")
-                json.dump(hist, open(LOG, "w"))
+                    atomic_torch_save(model.state_dict(), f"{CKPT}/best.pt")
+                    atomic_json(manifest_path, dict(
+                        tokenizer_fingerprint=fingerprint,
+                        vocab_size=VOCAB, context_length=CTX,
+                        n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
+                        train_years=[2015, 2020], checkpoint_selection_year=2021,
+                        global_step=step, best_validation_loss=vl,
+                    ))
+                    log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
             step += 1
+            if step % CKPT_EVERY == 0:
+                atomic_torch_save(dict(
+                    model=model.state_dict(), optimizer=opt.state_dict(),
+                    scaler=scaler.state_dict(), step=step, best_val=best_val,
+                    history=hist, tokenizer_fingerprint=fingerprint,
+                    torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
+                    cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
+                ), os.path.join(CKPT, "resume.pt"))
+                atomic_json(LOG, hist)
+                log(f"saved resumable checkpoint at step {step}")
 
-    torch.save(model.state_dict(), f"{CKPT}/final.pt")
-    json.dump(hist, open(LOG, "w"), indent=1)
-    log(f"DONE best_val={best_val:.4f}  params={n_params/1e6:.2f}M")
+    atomic_torch_save(model.state_dict(), f"{CKPT}/final.pt")
+    atomic_json(LOG, hist)
+    log(f"DONE best_val={best_val:.4f}  params={n_params/1e6:.2f}M  batch={BATCH} accum={ACCUM_STEPS}")
     print("STAGE3 DONE", flush=True)
 
 
