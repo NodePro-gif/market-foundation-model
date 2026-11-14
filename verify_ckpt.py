@@ -36,7 +36,7 @@ def main():
     fingerprint = s3.tokenizer_fingerprint()
     if manifest.get("tokenizer_fingerprint") != fingerprint:
         raise SystemExit("TOKENIZER MISMATCH: retrain stage3 before fine-tuning")
-    model = s3.MarketGPT()
+    model = s3.MarketGPT().to(s3.DEVICE)
     sd = torch.load(ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(sd)
     model.eval()
@@ -52,7 +52,10 @@ def main():
         for i, xb in enumerate(dl):
             if i >= N:
                 break
-            _, loss = model(xb, xb)
+            xb = xb.to(s3.DEVICE)
+            with torch.autocast(device_type=s3.DEVICE.type, dtype=torch.float16,
+                                enabled=s3.DEVICE.type == "cuda"):
+                _, loss = model(xb, xb)
             valid_tokens = int((xb[:, 1:] != s3.PAD).sum().item())
             tot += loss.item() * valid_tokens
             n += valid_tokens
