@@ -142,7 +142,7 @@ python -u stage4_finetune.py
 
 For pretraining on Colab T4, the notebook defaults to micro-batch 32 with 2 gradient-accumulation steps (effective batch 64), FP16 AMP and periodic resumable checkpoints. Fine-tuning defaults to micro-batch 32 with 8 accumulation steps (effective batch 256) and samples training windows with equal probability per non-held-out asset; checkpoint selection remains XAUUSD 2021. These are starting configurations, not guaranteed optimal settings for every runtime. Tune them only using training/validation behavior, never the final test set.
 
-Pretraining controls are `PRETRAIN_BATCH=32`, `PRETRAIN_ACCUM=2` (effective batch 64), `PRETRAIN_STEPS=6000`, `PRETRAIN_CKPT_EVERY=1000`, `PRETRAIN_EVAL_EVERY=250`, `PRETRAIN_WORKERS=2`, and `PRETRAIN_RESUME=1`. Resume restores model/optimizer state and RNG state; the current DataLoader epoch restarts, so a few windows can be repeated. If tokenizer artifacts are regenerated, remove the old `ckpt/resume.pt` before starting a fresh run.
+The Colab notebook uses `PRETRAIN_BATCH=32`, `PRETRAIN_ACCUM=2` (effective batch 64), `PRETRAIN_STEPS=6000`, `PRETRAIN_CKPT_EVERY=1000`, `PRETRAIN_EVAL_EVERY=250`, `PRETRAIN_WORKERS=2`, and `PRETRAIN_RESUME=1`. Resume restores model/optimizer state and RNG state; the current DataLoader epoch restarts, so a few windows can be repeated. If tokenizer artifacts are regenerated, remove the old `ckpt/resume.pt` before starting a fresh run.
 
 For a full reproduction, follow [Reproducibility and data protocol](docs/REPRODUCIBILITY.md) and the experiment notes in [PROGRESS.md](PROGRESS.md). Do not compare runs unless their data split, stride, seed, model checkpoint and cost assumptions match.
 
