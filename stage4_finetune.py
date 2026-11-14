@@ -8,8 +8,8 @@ Heads (multi-task on the last hidden state):
   3. quantiles   - fwd12/fwd48/fwd288 return    (P10/P50/P90 pinball)
 
 Evaluation:
-  - purged walk-forward on XAUUSD M5 2023 (never seen in pretraining)
-  - held-out symbols (NIKKEI, BRENT, EURGBP) 2022-2023
+  - checkpoint selection on XAUUSD M5 2021, final test on 2023
+  - held-out symbols (NIKKEI, BRENT, EURGBP) evaluated after selection
   - Brier / ECE calibration, regime-conditional metrics
   - cost-aware backtest vs LR + GRU + majority
 """
@@ -44,10 +44,14 @@ def _env(name, default, cast):
 # and on a small CPU box (ST4_EPOCHS=1 ST4_BATCH=32 ST4_STRIDE=64 ...)
 EPOCHS = _env("ST4_EPOCHS", 3, int)
 LR = _env("ST4_LR", 1e-4, float)
-BATCH = _env("ST4_BATCH", 256, int)
-STRIDE = _env("ST4_STRIDE", 4, int)            # train windows stride
-TEST_STRIDE = _env("ST4_TEST_STRIDE", 4, int)  # 2023 test windows stride
-HELD_STRIDE = _env("ST4_HELD_STRIDE", 8, int)  # held-out symbol windows stride
+BATCH = _env("ST4_BATCH", 64, int)
+ACCUM_STEPS = max(1, _env("ST4_ACCUM", 4, int))
+STRIDE = _env("ST4_STRIDE", 4, int)
+VAL_STRIDE = _env("ST4_VAL_STRIDE", 4, int)
+TEST_STRIDE = _env("ST4_TEST_STRIDE", 4, int)
+HELD_STRIDE = _env("ST4_HELD_STRIDE", 8, int)
+NUM_WORKERS = _env("ST4_WORKERS", 0, int)
+USE_AMP = _env("ST4_AMP", 1, int) == 1
 SEED = 42
 TARGET_SYM = "XAUUSD"
 HELD = ["NIKKEI", "BRENT", "EURGBP"]
@@ -55,6 +59,10 @@ HELD = ["NIKKEI", "BRENT", "EURGBP"]
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SCALER = torch.cuda.amp.GradScaler(enabled=DEVICE.type == "cuda" and USE_AMP)
+if DEVICE.type == "cuda":
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 t0 = time.time()
 
 
@@ -220,9 +228,27 @@ def auc_rank(y, s):
 
 # ------------------------------------------------------------------ main
 def load_base(ckpt_path):
+    # A raw state_dict cannot prove which BPE vocabulary its embedding rows mean.
+    # Require the manifest written beside a best checkpoint by stage3.
+    manifest_path = os.path.join(os.path.dirname(os.path.abspath(ckpt_path)),
+                                 "best_manifest.json")
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError(
+            f"missing {manifest_path}; retrain stage3 with the current tokenizer "
+            "before fine-tuning (legacy checkpoints are not accepted)"
+        )
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    fingerprint = s3.tokenizer_fingerprint()
+    if manifest.get("tokenizer_fingerprint") != fingerprint:
+        raise RuntimeError(
+            "pretraining checkpoint/tokenizer fingerprint mismatch; "
+            "run stage3_pretrain.py again"
+        )
     base = s3.MarketGPT()
     sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     base.load_state_dict(sd)
+    log(f"verified tokenizer fingerprint {fingerprint[:12]}...")
     return base
 
 
@@ -233,26 +259,35 @@ def run_epoch(model, dl, opt=None, tag=""):
     ps, ys, regs, ts = [], [], [], []
     crit_bce = nn.BCEWithLogitsLoss()
     n_steps = len(dl)
-    every = max(1, n_steps // 10)          # ~10 progress lines per epoch
+    every = max(1, n_steps // 10)
     ep_t0 = time.time()
+    if training:
+        opt.zero_grad(set_to_none=True)
     for i, (xb, yd, yv, yq, vq) in enumerate(dl):
         xb = xb.to(DEVICE)
         yd = yd.to(DEVICE).float()
         yv = yv.to(DEVICE)
         yq = yq.to(DEVICE)
         vq = vq.to(DEVICE)
-        if training:
-            opt.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(training):
-            pd, pv, pq = model(xb)
-            l_dir = crit_bce(pd, yd)
-            l_vol = nn.functional.cross_entropy(pv, yv)
-            l_q = pinball(pq, yq, vq)
-            loss = l_dir + l_vol + 0.5 * l_q
+            with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
+                                enabled=DEVICE.type == "cuda" and USE_AMP):
+                pd, pv, pq = model(xb)
+                l_dir = crit_bce(pd, yd)
+                l_vol = nn.functional.cross_entropy(pv, yv)
+                l_q = pinball(pq, yq, vq)
+                loss = l_dir + l_vol + 0.5 * l_q
         if training:
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            group_start = (i // ACCUM_STEPS) * ACCUM_STEPS
+            group_size = min(ACCUM_STEPS, n_steps - group_start)
+            SCALER.scale(loss / group_size).backward()
+            update_now = ((i + 1) % ACCUM_STEPS == 0) or (i + 1 == n_steps)
+            if update_now:
+                SCALER.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                SCALER.step(opt)
+                SCALER.update()
+                opt.zero_grad(set_to_none=True)
         if training and (i % every == 0 or i == n_steps - 1):
             el = time.time() - ep_t0
             eta = el * (n_steps - i - 1) / max(i + 1, 1)
@@ -304,25 +339,30 @@ def main():
     base = load_base(ckpt)
     model = FinetuneGPT(base).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
-    log(f"finetune model params: {n_params/1e6:.2f}M")
+    log(f"finetune model params: {n_params/1e6:.2f}M on {DEVICE}; batch={BATCH} x accum={ACCUM_STEPS}; AMP={USE_AMP}")
 
-    # Keep 2023 completely out of checkpoint selection and training feedback.
-    # The validation period selects the checkpoint; the test period is read once
-    # after training has finished.
+    # The final 2023 test dataset is deliberately not constructed until the
+    # checkpoint has been selected using 2021 validation data only.
     train_ds = FinetuneDS(TARGET_SYM, years=range(2015, 2021), stride=STRIDE)
-    val_ds = FinetuneDS(TARGET_SYM, years=[2021], stride=TEST_STRIDE)
-    test_ds = FinetuneDS(TARGET_SYM, years=[2023], stride=TEST_STRIDE)
-    if not len(train_ds) or not len(val_ds) or not len(test_ds):
+    val_ds = FinetuneDS(TARGET_SYM, years=[2021], stride=VAL_STRIDE)
+    if not len(train_ds) or not len(val_ds):
         raise SystemExit(
-            f"empty dataset: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}"
+            f"empty dataset: train={len(train_ds)} val={len(val_ds)}"
         )
-    tr_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True)
-    va_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False)
-    te_dl = DataLoader(test_ds, batch_size=BATCH, shuffle=False)
+    loader_args = dict(num_workers=NUM_WORKERS,
+                       pin_memory=DEVICE.type == "cuda")
+    if NUM_WORKERS > 0:
+        loader_args["persistent_workers"] = True
+    tr_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
+                       drop_last=False, **loader_args)
+    va_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False, **loader_args)
 
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                             lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
     best_val_auc = -float("inf")
+    best_path = os.path.join(OUT, "best.pt")
+    if os.path.exists(best_path):
+        os.remove(best_path)  # never accidentally reuse a checkpoint from an older run
     for ep in range(1, EPOCHS + 1):
         r = run_epoch(model, tr_dl, opt, tag=f"ep{ep} TRAIN")
         va = run_epoch(model, va_dl, None, tag=f"ep{ep} VALID")
@@ -333,12 +373,17 @@ def main():
             f"brier={va['brier']:.4f} ece={va['ece']:.4f}")
         if np.isfinite(va["auc"]) and va["auc"] > best_val_auc:
             best_val_auc = va["auc"]
-            torch.save(model.state_dict(), f"{OUT}/best.pt")
+            torch.save(model.state_dict(), best_path)
 
-    if not os.path.exists(f"{OUT}/best.pt"):
+    if not os.path.exists(best_path):
         raise SystemExit("no valid checkpoint was selected; validation AUC is undefined")
-    model.load_state_dict(torch.load(f"{OUT}/best.pt", map_location="cpu",
+    model.load_state_dict(torch.load(best_path, map_location="cpu",
                                      weights_only=True))
+    # Only now materialize the untouched final-test dataset.
+    test_ds = FinetuneDS(TARGET_SYM, years=[2023], stride=TEST_STRIDE)
+    if not len(test_ds):
+        raise SystemExit("empty final-test dataset for 2023")
+    te_dl = DataLoader(test_ds, batch_size=BATCH, shuffle=False, **loader_args)
     te = run_epoch(model, te_dl, None)
     log(f"TEST XAUUSD 2023: acc={te['acc']:.4f} auc={te['auc']:.4f} "
         f"brier={te['brier']:.4f} ece={te['ece']:.4f} n={len(te['y']):,}")
@@ -384,7 +429,13 @@ def main():
     json.dump(dict(test=dict(acc=te["acc"], auc=te["auc"],
                              brier=te["brier"], ece=te["ece"],
                              n=int(len(te["y"]))),
-                   held_out=held_res),
+                   held_out=held_res,
+                   protocol=dict(train_years=[2015, 2020], checkpoint_selection_year=2021,
+                                 calibration_year=2022, final_test_year=2023),
+                   config=dict(epochs=EPOCHS, batch=BATCH, accumulation=ACCUM_STEPS,
+                               learning_rate=LR, train_stride=STRIDE,
+                               validation_stride=VAL_STRIDE, test_stride=TEST_STRIDE,
+                               amp=USE_AMP, device=str(DEVICE))),
               open(f"{OUT}/metrics.json", "w"), indent=1)
     np.save(f"{OUT}/test_pred.npy", te["pred"])
     np.save(f"{OUT}/test_y.npy", te["y"])
