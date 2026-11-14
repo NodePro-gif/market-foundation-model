@@ -2,6 +2,7 @@
 """Stage 1 - download the multi-asset market corpus (M5 + M1) and verify it."""
 
 import concurrent.futures as cf
+from datetime import datetime, timezone
 import gzip
 import json
 import os
@@ -120,10 +121,20 @@ for sym, tf, year in JOBS:
     if not arr:
         continue
     bars = len(arr)
+    timestamps = [int(row["ts"]) for row in arr]
+    if any(right <= left for left, right in zip(timestamps, timestamps[1:])):
+        log(f"  BAD {sym}/{tf}/{year}: timestamps are not strictly increasing")
+        continue
+    actual_years = {
+        datetime.fromtimestamp(ts, tz=timezone.utc).year for ts in timestamps
+    }
+    if actual_years != {year}:
+        log(f"  BAD {sym}/{tf}/{year}: UTC years found {sorted(actual_years)}")
+        continue
     total_bars += bars
     manifest.append(dict(
         symbol=sym, tf=tf, year=year, bars=bars,
-        t0=arr[0]["ts"], t1=arr[-1]["ts"],
+        t0=timestamps[0], t1=timestamps[-1],
         o0=arr[0]["o"], c1=arr[-1]["c"],
     ))
 
@@ -137,4 +148,17 @@ for m in manifest:
 for k, v in sorted(by_tf.items()):
     log(f"  {k}: {v:,} bars")
 log(f"disk usage: {sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(ROOT) for f in fs)/1e6:.1f} MB")
+
+# XAUUSD M5 is the primary target series and must cover every requested year.
+valid_jobs = {(m["symbol"], m["tf"], m["year"]) for m in manifest}
+missing_primary = [
+    year for year in YEARS if ("XAUUSD", "M5", year) not in valid_jobs
+]
+if missing_primary:
+    raise SystemExit(
+        f"primary XAUUSD M5 data is incomplete; missing/invalid years: {missing_primary}"
+    )
+if fail:
+    raise SystemExit(f"{fail} corpus downloads failed; fix network/provider errors and rerun")
+
 print("STAGE1 DONE", flush=True)
