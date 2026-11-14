@@ -6,7 +6,12 @@ import urllib.error
 import urllib.request
 
 BASE = "https://evtradelabs.com/api/simulator/data"
-ROOT = r"D:\xauusd-dl\corpus"
+LOCAL_DATA_ROOT = os.environ.get(
+    "MFM_DATA_ROOT",
+    r"D:\xauusd-dl" if os.name == "nt"
+    else os.path.join(os.path.expanduser("~"), "market-foundation-model-data"),
+)
+ROOT = os.environ.get("MFM_CORPUS_DIR", os.path.join(LOCAL_DATA_ROOT, "corpus"))
 
 SYMBOLS = [
     "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "EURGBP", "GBPJPY",
