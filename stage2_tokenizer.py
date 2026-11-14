@@ -168,6 +168,8 @@ def step_b():
     FR, AT, RG, PR = [], [], [], []
     vsample = []
     for sym, tf, z in iter_series():
+        if sym in HELD_OUT:
+            continue  # held-out assets must not shape tokenizer calibration
         a, p, r, d, ret, atr, rng = indicators(z["ts"], z["o"], z["h"], z["l"], z["c"], z["v"])
         train_mask = years_from_ts(z["ts"]) <= TRAIN_END_YEAR
         if not train_mask.any():
@@ -349,6 +351,8 @@ def step_c():
         ch = a8 * 64 + p8 * 16 + r8 * 4 + d8
         raws[key]["ch"] = ch
         train_ch = ch[years_from_ts(rr["ts"]) <= TRAIN_END_YEAR]
+        if key[0] in HELD_OUT:
+            train_ch = train_ch[:0]  # encode held-out assets, never fit on them
         if len(train_ch):
             chunks.append(train_ch[:: max(1, len(train_ch) // 120000)][:120000])
     if not chunks:
