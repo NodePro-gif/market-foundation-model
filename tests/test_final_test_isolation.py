@@ -62,3 +62,17 @@ def test_final_test_is_accessed_only_after_2022_policy_selection():
     test_phase = source.split("locked final test", 1)[1]
     assert "for k in HORIZONS" not in test_phase
     assert "k_best" in test_phase
+
+
+def test_2022_calibration_labels_are_purged_before_july_policy_period():
+    source = (ROOT / "validate_stage4.py").read_text(encoding="utf-8")
+    assert "split_2022_periods(sample_ts)" in source
+    assert "cal_mask &= (bars_all + 288) < july_bar" in source
+    assert "pick is None" in source
+    assert "2023 final test was NOT accessed" in source
+
+
+def test_final_test_has_explicit_repeat_access_lock():
+    source = (ROOT / "validate_stage4.py").read_text(encoding="utf-8")
+    assert "FINAL_TEST_2023_ACCESSED.lock" in source
+    assert "MFM_ALLOW_FINAL_TEST_RERUN" in source
