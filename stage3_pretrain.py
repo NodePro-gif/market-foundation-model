@@ -18,6 +18,7 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+from training_utils import PlateauScale, perplexity_from_loss, warmup_cosine_lr
 from torch.utils.data import DataLoader, Dataset
 
 IS_COLAB = os.path.isdir("/content")
@@ -37,7 +38,10 @@ CTX = 512
 BATCH = int(os.environ.get("PRETRAIN_BATCH", "64"))
 ACCUM_STEPS = max(1, int(os.environ.get("PRETRAIN_ACCUM", "1")))
 LR = float(os.environ.get("PRETRAIN_LR", "3e-4"))
-WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "300"))
+WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "150"))
+PLATEAU_PATIENCE = int(os.environ.get("PRETRAIN_PLATEAU_PATIENCE", "2"))
+PLATEAU_FACTOR = float(os.environ.get("PRETRAIN_PLATEAU_FACTOR", "0.5"))
+MIN_LR_SCALE = float(os.environ.get("PRETRAIN_MIN_LR_SCALE", "0.125"))
 MAX_STEPS = int(os.environ.get("PRETRAIN_STEPS", "6000"))
 CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "1000"))
 EVAL_EVERY = int(os.environ.get("PRETRAIN_EVAL_EVERY", "250"))
@@ -409,11 +413,16 @@ def main():
                                 betas=(0.9, 0.95), weight_decay=0.1)
     total_steps = MAX_STEPS
 
+    lr_controller = PlateauScale(
+        patience=PLATEAU_PATIENCE, factor=PLATEAU_FACTOR,
+        min_scale=MIN_LR_SCALE,
+    )
+
     def lr_at(step):
-        if step < WARMUP:
-            return LR * (step + 1) / WARMUP
-        p = (step - WARMUP) / max(total_steps - WARMUP, 1)
-        return 0.1 * LR + 0.45 * LR * (1 + math.cos(math.pi * p))
+        return warmup_cosine_lr(
+            step, base_lr=LR, warmup=WARMUP,
+            total_steps=total_steps, min_ratio=0.1,
+        ) * lr_controller.scale
 
     scaler = torch.cuda.amp.GradScaler(enabled=DEVICE.type == "cuda")
     step = 0
@@ -432,6 +441,12 @@ def main():
         step = int(state["step"])
         best_val = float(state["best_val"])
         hist = state.get("history", [])
+        if state.get("lr_controller") is not None:
+            lr_controller.load_state_dict(state["lr_controller"])
+        elif math.isfinite(best_val):
+            # Backward-compatible resume from checkpoints created before
+            # the adaptive validation-loss controller was introduced.
+            lr_controller.best = best_val
         if state.get("loader_rng") is not None:
             generator.set_state(state["loader_rng"])
         torch.set_rng_state(state["torch_rng"])
@@ -513,15 +528,21 @@ def main():
                     peak_gib = (torch.cuda.max_memory_allocated(DEVICE) / 1024**3
                                 if DEVICE.type == "cuda" else 0.0)
                     log(f"step {step:>5} loss={loss.item():.4f} "
-                        f"ppl={math.exp(min(loss.item(), 20)):8.1f} lr={lr:.2e} "
+                        f"ppl={perplexity_from_loss(loss.item()):8.4f} lr={lr:.2e} "
                         f"windows/s={windows_s:.1f} peak_vram={peak_gib:.2f}GiB")
                     perf_t0 = time.time()
                     perf_windows = 0
                 if step % EVAL_EVERY == 0:
                     vl = evaluate()
                     hist.append(dict(step=step, val_loss=vl, train_loss=loss.item()))
+                    old_scale = lr_controller.scale
+                    new_scale = lr_controller.observe(vl)
                     log(f"  EVAL step {step}: val_loss={vl:.4f} "
-                        f"ppl={math.exp(min(vl, 20)):.1f}")
+                        f"ppl={perplexity_from_loss(vl):.4f} "
+                        f"lr_scale={new_scale:.3f}")
+                    if new_scale < old_scale:
+                        log(f"  validation loss plateaued; LR multiplier "
+                            f"{old_scale:.3f} -> {new_scale:.3f}")
                     if vl < best_val:
                         best_val = vl
                         atomic_torch_save(model.state_dict(), f"{CKPT}/best.pt")
@@ -538,6 +559,7 @@ def main():
                     atomic_torch_save(dict(
                         model=model.state_dict(), optimizer=opt.state_dict(),
                         scaler=scaler.state_dict(), step=step, best_val=best_val,
+                        lr_controller=lr_controller.state_dict(),
                         history=hist, tokenizer_fingerprint=fingerprint,
                         torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
                         loader_rng=generator.get_state(),
@@ -548,7 +570,8 @@ def main():
 
     atomic_torch_save(model.state_dict(), f"{CKPT}/final.pt")
     atomic_json(LOG, hist)
-    log(f"DONE best_val={best_val:.4f}  params={n_params/1e6:.2f}M  batch={BATCH} accum={ACCUM_STEPS}")
+    log(f"DONE best_val={best_val:.4f} best_ppl={perplexity_from_loss(best_val):.4f} "
+        f"params={n_params/1e6:.2f}M batch={BATCH} accum={ACCUM_STEPS}")
     print("STAGE3 DONE", flush=True)
 
 
