@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from training_utils import (EarlyStopping, ExactDistributedEvalSampler,
@@ -687,4 +688,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    record(main)()
