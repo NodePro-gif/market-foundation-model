@@ -169,14 +169,27 @@ class FinetuneGPT(nn.Module):
         super().__init__()
         self.backbone = base
         d = s3.N_EMBD
-        self.dir_head = nn.Sequential(nn.Linear(d, 64), nn.GELU(), nn.Linear(64, 1))
-        self.vol_head = nn.Sequential(nn.Linear(d, 64), nn.GELU(), nn.Linear(64, 4))
-        self.q_head = nn.Sequential(nn.Linear(d, 64), nn.GELU(), nn.Linear(64, 9))
+        hidden = 128
+        # Independent normalized heads reduce scale coupling between the
+        # heterogeneous direction, regime and return-quantile objectives.
+        def prediction_head(out_dim):
+            return nn.Sequential(
+                nn.LayerNorm(d),
+                nn.Linear(d, hidden),
+                nn.GELU(),
+                nn.Dropout(s3.DROPOUT),
+                nn.Linear(hidden, out_dim),
+            )
+        self.dir_head = prediction_head(1)
+        self.vol_head = prediction_head(4)
+        self.q_head = prediction_head(9)
         # 9 = 3 horizons x (P10, P50, P90)
 
     def forward(self, ids):
-        x = self.backbone.tok(ids) + self.backbone.pos(
-            torch.arange(ids.shape[1], device=ids.device))[None]
+        x = self.backbone.drop(
+            self.backbone.tok(ids) + self.backbone.pos(
+                torch.arange(ids.shape[1], device=ids.device))[None]
+        )
         for b in self.backbone.blocks:
             x = b(x)
         x = self.backbone.ln_f(x[:, -1])
