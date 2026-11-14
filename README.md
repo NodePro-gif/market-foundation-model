@@ -134,7 +134,7 @@ python validate_stage4.py
 python backtest_stage4.py
 ```
 
-Do not rerun validate_stage4.py to tune a strategy after viewing 2023. Its 2023 section is a final report for the policy already selected on 2022. For a new research iteration, change the model/policy using training and validation periods, then preserve a fresh untouched final period.
+The 2022 protocol is chronological and disjoint: Jan–Jun fits Platt probability calibration; Jul–Dec selects the threshold and holding horizon. If either period cannot produce a valid policy with the minimum trade count, evaluation stops before constructing 2023 data. After a successful final evaluation, `results/finetune/FINAL_TEST_2023_ACCESSED.lock` prevents accidental repeat access; an intentional rerun requires `MFM_ALLOW_FINAL_TEST_RERUN=1`. Do not rerun validate_stage4.py to tune a strategy after viewing 2023. For a new research iteration, change the model/policy using training and validation periods, then preserve a fresh untouched final period.
 
 For the fine-tuning script, selected settings can be overridden through environment variables:
 
