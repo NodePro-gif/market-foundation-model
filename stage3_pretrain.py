@@ -12,7 +12,9 @@ import hashlib
 import json
 import math
 import os
+import queue
 import shutil
+import threading
 import time
 
 import numpy as np
@@ -111,15 +113,47 @@ def tokenizer_fingerprint():
     return digest.hexdigest()
 
 
+_MIRROR_QUEUE = queue.Queue()
+_MIRROR_THREAD = None
+
+
+def _mirror_worker():
+    while True:
+        path = _MIRROR_QUEUE.get()
+        try:
+            if path is None:
+                return
+            backup_dir = os.environ.get("MFM_CKPT_BACKUP_DIR")
+            if not backup_dir or not os.path.isfile(path):
+                continue
+            os.makedirs(backup_dir, exist_ok=True)
+            target = os.path.join(backup_dir, os.path.basename(path))
+            tmp = target + f".{os.getpid()}.tmp"
+            shutil.copy2(path, tmp)
+            os.replace(tmp, target)
+        except Exception as exc:
+            print(f"[checkpoint mirror warning] {exc}", flush=True)
+        finally:
+            _MIRROR_QUEUE.task_done()
+
+
 def _mirror_checkpoint(path):
+    global _MIRROR_THREAD
     backup_dir = os.environ.get("MFM_CKPT_BACKUP_DIR")
-    if not backup_dir:
+    # Stage 4 also uses atomic_torch_save. Only mirror Stage-3 files; never
+    # overwrite the pretrained best.pt with the fine-tuned best.pt.
+    if not backup_dir or os.path.abspath(os.path.dirname(path)) != os.path.abspath(CKPT):
         return
-    os.makedirs(backup_dir, exist_ok=True)
-    target = os.path.join(backup_dir, os.path.basename(path))
-    tmp = target + ".tmp"
-    shutil.copy2(path, tmp)
-    os.replace(tmp, target)
+    if _MIRROR_THREAD is None:
+        _MIRROR_THREAD = threading.Thread(target=_mirror_worker, daemon=True)
+        _MIRROR_THREAD.start()
+    _MIRROR_QUEUE.put(path)
+
+
+def flush_checkpoint_mirrors():
+    """Wait for queued Drive copies before a normal process exit."""
+    if _MIRROR_THREAD is not None:
+        _MIRROR_QUEUE.join()
 
 
 def atomic_json(path, payload):
@@ -360,6 +394,13 @@ class MarketGPT(nn.Module):
 def main():
     os.makedirs(CKPT, exist_ok=True)
     model = MarketGPT().to(DEVICE)
+    compile_enabled = DEVICE.type == "cuda" and os.environ.get("MFM_TORCH_COMPILE", "0") == "1"
+    if compile_enabled and hasattr(model, "compile"):
+        compile_mode = os.environ.get("MFM_COMPILE_MODE", "reduce-overhead")
+        model.compile(mode=compile_mode)
+        log(f"torch.compile enabled (mode={compile_mode}); first iterations include compilation warm-up")
+    elif compile_enabled:
+        log("torch.compile requested but unavailable in this PyTorch build; eager mode retained")
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
     if DEVICE.type == "cuda":
@@ -471,6 +512,8 @@ def main():
 
     model.train()
     opt.zero_grad(set_to_none=True)
+    window_started = time.time()
+    window_examples = 0
     while step < MAX_STEPS:
         for i, batch in enumerate(train_dl):
             if step >= MAX_STEPS:
@@ -479,6 +522,7 @@ def main():
             for g in opt.param_groups:
                 g["lr"] = lr
             xb = batch.to(DEVICE, non_blocking=True)
+            window_examples += int(xb.shape[0])
             group_start = (i // ACCUM_STEPS) * ACCUM_STEPS
             group_size = min(ACCUM_STEPS, len(train_dl) - group_start)
             with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
@@ -495,9 +539,16 @@ def main():
 
             if update_now:
                 step += 1
-                if step % 10 == 0:
-                    log(f"step {step:>5}  loss {loss.item():.4f}  "
-                        f"ppl {math.exp(min(loss.item(), 20)):8.1f}  lr {lr:.2e}")
+                if step % 50 == 0:
+                    elapsed = max(time.time() - window_started, 1e-6)
+                    samples_s = window_examples / elapsed
+                    mem = (torch.cuda.max_memory_allocated(DEVICE) / 1024**3
+                           if DEVICE.type == "cuda" else 0.0)
+                    log(f"step {step:>5} loss={loss.item():.4f} "
+                        f"ppl={math.exp(min(loss.item(), 20)):8.1f} lr={lr:.2e} "
+                        f"throughput={samples_s:.1f} windows/s peak_vram={mem:.2f}GiB")
+                    window_started = time.time()
+                    window_examples = 0
                 if step % EVAL_EVERY == 0:
                     vl = evaluate()
                     hist.append(dict(step=step, val_loss=vl, train_loss=loss.item()))
@@ -529,6 +580,7 @@ def main():
 
     atomic_torch_save(model.state_dict(), f"{CKPT}/final.pt")
     atomic_json(LOG, hist)
+    flush_checkpoint_mirrors()
     log(f"DONE best_val={best_val:.4f}  params={n_params/1e6:.2f}M  batch={BATCH} accum={ACCUM_STEPS}")
     print("STAGE3 DONE", flush=True)
 
