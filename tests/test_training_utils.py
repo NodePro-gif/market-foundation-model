@@ -2,7 +2,8 @@ import math
 
 import pytest
 
-from training_utils import PlateauScale, warmup_cosine_lr, perplexity_from_loss
+from training_utils import (EarlyStopping, ExactDistributedEvalSampler, PlateauScale,
+                             warmup_cosine_lr, perplexity_from_loss)
 
 
 def test_plateau_scale_reduces_learning_rate_after_patience():
@@ -53,3 +54,36 @@ def test_perplexity_has_mathematical_lower_bound_one():
     assert perplexity_from_loss(math.log(2.0)) == pytest.approx(2.0)
     with pytest.raises(ValueError, match="finite and non-negative"):
         perplexity_from_loss(-0.1)
+
+
+def test_exact_distributed_eval_sampler_covers_each_index_once():
+    dataset = list(range(11))
+    shards = [list(ExactDistributedEvalSampler(dataset, 2, rank)) for rank in range(2)]
+    combined = shards[0] + shards[1]
+    assert sorted(combined) == list(range(len(dataset)))
+    assert len(combined) == len(set(combined))
+
+
+def test_exact_distributed_eval_sampler_handles_empty_rank():
+    sampler = ExactDistributedEvalSampler([1], num_replicas=2, rank=1)
+    assert list(sampler) == []
+    assert len(sampler) == 0
+
+
+def test_early_stopping_waits_for_patience_and_resets_on_improvement():
+    stopper = EarlyStopping(patience=2, min_delta=0.01)
+    assert stopper.observe(1.0) is False
+    assert stopper.observe(1.005) is False
+    assert stopper.observe(1.02) is False
+    assert stopper.observe(1.03) is False
+    assert stopper.observe(1.04) is True
+
+
+def test_early_stopping_state_round_trip():
+    stopper = EarlyStopping(patience=3, min_delta=0.001)
+    stopper.observe(1.0)
+    stopper.observe(1.1)
+    restored = EarlyStopping(patience=3, min_delta=0.001)
+    restored.load_state_dict(stopper.state_dict())
+    assert restored.best == 1.0
+    assert restored.bad_evals == 1
