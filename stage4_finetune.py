@@ -44,8 +44,8 @@ def _env(name, default, cast):
 # and on a small CPU box (ST4_EPOCHS=1 ST4_BATCH=32 ST4_STRIDE=64 ...)
 EPOCHS = _env("ST4_EPOCHS", 3, int)
 LR = _env("ST4_LR", 1e-4, float)
-BATCH = _env("ST4_BATCH", 64, int)
-ACCUM_STEPS = max(1, _env("ST4_ACCUM", 4, int))
+BATCH = _env("ST4_BATCH", 32, int)
+ACCUM_STEPS = max(1, _env("ST4_ACCUM", 8, int))
 STRIDE = _env("ST4_STRIDE", 32, int)  # balanced multi-asset training windows
 VAL_STRIDE = _env("ST4_VAL_STRIDE", 4, int)
 TEST_STRIDE = _env("ST4_TEST_STRIDE", 4, int)
