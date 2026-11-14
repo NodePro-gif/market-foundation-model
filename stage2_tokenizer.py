@@ -347,7 +347,6 @@ def step_c():
 
     # --- BPE training sample: fit vocabulary on train years only ---------
     chunks = []
-    rng = np.random.default_rng(42)
     for key in sorted(raws):
         rr = raws[key]
         a8 = bin4(rr["a"], edges["a"]).astype(np.int64)
@@ -360,11 +359,17 @@ def step_c():
         if key[0] in HELD_OUT:
             train_ch = train_ch[:0]  # encode held-out assets, never fit on them
         if len(train_ch):
-            # Use contiguous excerpts, not every Nth bar: BPE must learn
-            # adjacent temporal motifs rather than artificial skip-bar pairs.
-            take = min(len(train_ch), 120000)
-            start = int(rng.integers(0, len(train_ch) - take + 1))
-            chunks.append(train_ch[start:start + take])
+            # Use contiguous excerpts distributed over the full training period,
+            # not every Nth bar: BPE must learn real adjacent temporal motifs.
+            if len(train_ch) <= 120000:
+                chunks.append(train_ch)
+            else:
+                chunk_size = 30000
+                starts = np.linspace(
+                    0, len(train_ch) - chunk_size, num=4, dtype=np.int64
+                )
+                chunks.extend(train_ch[int(st):int(st) + chunk_size]
+                              for st in starts)
     if not chunks:
         raise RuntimeError("no training-period bars available for BPE fitting")
     # -1 is a boundary sentinel, excluded from all BPE pair counts.
