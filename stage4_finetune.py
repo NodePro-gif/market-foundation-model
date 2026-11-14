@@ -55,6 +55,9 @@ TEST_STRIDE = _env("ST4_TEST_STRIDE", 4, int)
 HELD_STRIDE = _env("ST4_HELD_STRIDE", 8, int)
 NUM_WORKERS = _env("ST4_WORKERS", 0, int)
 USE_AMP = _env("ST4_AMP", 1, int) == 1
+WARMUP_RATIO = _env("ST4_WARMUP_RATIO", 0.08, float)
+MIN_LR_RATIO = _env("ST4_MIN_LR_RATIO", 0.10, float)
+EARLY_STOP_PATIENCE = _env("ST4_PATIENCE", 3, int)
 SEED = 42
 TARGET_SYM = "XAUUSD"
 HELD = ["NIKKEI", "BRENT", "EURGBP"]
@@ -166,14 +169,27 @@ class FinetuneGPT(nn.Module):
         super().__init__()
         self.backbone = base
         d = s3.N_EMBD
-        self.dir_head = nn.Sequential(nn.Linear(d, 64), nn.GELU(), nn.Linear(64, 1))
-        self.vol_head = nn.Sequential(nn.Linear(d, 64), nn.GELU(), nn.Linear(64, 4))
-        self.q_head = nn.Sequential(nn.Linear(d, 64), nn.GELU(), nn.Linear(64, 9))
+        hidden = 128
+        # Independent normalized heads reduce scale coupling between the
+        # heterogeneous direction, regime and return-quantile objectives.
+        def prediction_head(out_dim):
+            return nn.Sequential(
+                nn.LayerNorm(d),
+                nn.Linear(d, hidden),
+                nn.GELU(),
+                nn.Dropout(s3.DROPOUT),
+                nn.Linear(hidden, out_dim),
+            )
+        self.dir_head = prediction_head(1)
+        self.vol_head = prediction_head(4)
+        self.q_head = prediction_head(9)
         # 9 = 3 horizons x (P10, P50, P90)
 
     def forward(self, ids):
-        x = self.backbone.tok(ids) + self.backbone.pos(
-            torch.arange(ids.shape[1], device=ids.device))[None]
+        x = self.backbone.drop(
+            self.backbone.tok(ids) + self.backbone.pos(
+                torch.arange(ids.shape[1], device=ids.device))[None]
+        )
         for b in self.backbone.blocks:
             x = b(x)
         x = self.backbone.ln_f(x[:, -1])
@@ -257,7 +273,7 @@ def load_base(ckpt_path):
     return base
 
 
-def run_epoch(model, dl, opt=None, tag=""):
+def run_epoch(model, dl, opt=None, tag="", scheduler=None):
     training = opt is not None
     model.train(training)
     tot = dict(dir=0.0, vol=0.0, q=0.0, n=0)
@@ -292,6 +308,8 @@ def run_epoch(model, dl, opt=None, tag=""):
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 SCALER.step(opt)
                 SCALER.update()
+                if scheduler is not None:
+                    scheduler.step()
                 opt.zero_grad(set_to_none=True)
         if training and (i % every == 0 or i == n_steps - 1):
             el = time.time() - ep_t0
@@ -386,7 +404,19 @@ def main():
 
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                             lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
+    updates_per_epoch = math.ceil(len(tr_dl) / ACCUM_STEPS)
+    total_updates = max(1, EPOCHS * updates_per_epoch)
+    warmup_updates = min(total_updates - 1, max(1, int(total_updates * WARMUP_RATIO)))
+    def lr_lambda(update):
+        if update < warmup_updates:
+            return max(1e-3, (update + 1) / warmup_updates)
+        progress = min(1.0, (update - warmup_updates) /
+                      max(1, total_updates - warmup_updates))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return MIN_LR_RATIO + (1.0 - MIN_LR_RATIO) * cosine
+    scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     best_val_auc = -float("inf")
+    stale_epochs = 0
     # Remove cached predictions/calibration from earlier checkpoints so that
     # validation can never silently reuse stale model outputs.
     for stale in ("val_pred.npy", "val_y.npy", "val_pred_cal.npy",
@@ -398,16 +428,26 @@ def main():
     if os.path.exists(best_path):
         os.remove(best_path)  # never accidentally reuse a checkpoint from an older run
     for ep in range(1, EPOCHS + 1):
-        r = run_epoch(model, tr_dl, opt, tag=f"ep{ep} TRAIN")
+        r = run_epoch(model, tr_dl, opt, tag=f"ep{ep} TRAIN",
+                      scheduler=scheduler)
         va = run_epoch(model, va_dl, None, tag=f"ep{ep} VALID")
         log(f"ep{ep} TRAIN loss_dir={r['loss_dir']:.4f} "
             f"loss_vol={r['loss_vol']:.4f} loss_q={r['loss_q']:.4f} "
             f"acc={r['acc']:.4f} auc={r['auc']:.4f}")
         log(f"ep{ep} VALID acc={va['acc']:.4f} auc={va['auc']:.4f} "
             f"brier={va['brier']:.4f} ece={va['ece']:.4f}")
-        if np.isfinite(va["auc"]) and va["auc"] > best_val_auc:
+        current_lr = opt.param_groups[0]["lr"]
+        log(f"  optimizer_updates={updates_per_epoch * ep} lr_next={current_lr:.3e}")
+        if np.isfinite(va["auc"]) and va["auc"] > best_val_auc + 1e-5:
             best_val_auc = va["auc"]
+            stale_epochs = 0
             s3.atomic_torch_save(model.state_dict(), best_path)
+        else:
+            stale_epochs += 1
+            log(f"  no validation AUC improvement ({stale_epochs}/{EARLY_STOP_PATIENCE})")
+        if stale_epochs >= EARLY_STOP_PATIENCE:
+            log("early stopping: validation AUC did not improve")
+            break
 
     if not os.path.exists(best_path):
         raise SystemExit("no valid checkpoint was selected; validation AUC is undefined")
@@ -473,7 +513,12 @@ def main():
                    protocol=dict(train_years=[2015, 2020], checkpoint_selection_year=2021,
                                  calibration_year=2022, final_test_year=2023),
                    config=dict(epochs=EPOCHS, batch=BATCH, accumulation=ACCUM_STEPS,
-                               learning_rate=LR, train_stride=STRIDE,
+                               learning_rate=LR, warmup_ratio=WARMUP_RATIO,
+                               min_lr_ratio=MIN_LR_RATIO,
+                               early_stop_patience=EARLY_STOP_PATIENCE,
+                               optimizer="AdamW", scheduler="linear-warmup+cosine-decay",
+                               total_optimizer_updates=total_updates,
+                               train_stride=STRIDE,
                                validation_stride=VAL_STRIDE, test_stride=TEST_STRIDE,
                                train_symbols=list(train_windows_by_symbol),
                                train_windows_by_symbol=train_windows_by_symbol,

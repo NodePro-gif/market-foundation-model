@@ -24,6 +24,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from portfolio import simulate_non_overlapping
+
 import stage4_finetune as s4
 
 VAL_YEARS = (2022,)  # reserved for calibration/threshold selection
@@ -93,10 +95,13 @@ def best_threshold(p, y, b, c, cost):
         m = sig != 0
         if m.sum() < MIN_BETS:
             continue
-        r = sig[m] * next_returns(b[m], c, 1)
-        net = float(np.nansum(r) - m.sum() * 2 * cost)
+        eligible = m & (b + 1 < len(c))
+        sim = simulate_non_overlapping(c, b[eligible], sig[eligible], 1, cost)
+        net = sim["net_compounded"]
+        if sim["trade_count"] < MIN_BETS:
+            continue
         if best is None or net > best[1]:
-            best = (float(t), net, int(m.sum()))
+            best = (float(t), net, sim["trade_count"])
     return best
 
 
@@ -167,14 +172,18 @@ def main():
     mv = sigv != 0
     val_horizons = []
     for k in HORIZONS:
-        rv = sigv[mv] * next_returns(bv[mv], c, k)
-        n = int(np.isfinite(rv).sum())
-        if n < 10:
+        eligible = mv & (bv + k < len(c))
+        if eligible.sum() < 10:
             continue
-        gross = float(np.nansum(rv))
+        sims = {co: simulate_non_overlapping(
+            c, bv[eligible], sigv[eligible], k, co) for co in COSTS_SIDE}
+        reference = sims[COSTS_SIDE[1]]
+        if reference["trade_count"] < 10:
+            continue
         val_horizons.append(dict(
-            horizon=k, n=n, gross_total=gross,
-            nets={f"{co}": gross - n * 2 * co for co in COSTS_SIDE}))
+            horizon=k, n=reference["trade_count"],
+            gross_total=reference["gross_compounded"],
+            nets={f"{co}": sims[co]["net_compounded"] for co in COSTS_SIDE}))
     k_best = None
     if val_horizons:
         best = max(val_horizons,
@@ -218,13 +227,16 @@ def main():
     print(f"  {'k bars':>7} {'n':>5} {'gross':>9} "
           + " ".join(f"net@{co*1e4:4.1f}bps".rjust(11) for co in COSTS_SIDE))
     for k in HORIZONS:
-        r = sig[m] * next_returns(bt[m], c, k)
-        n = int(np.isfinite(r).sum())
-        gross = float(np.nansum(r))
+        eligible = m & (bt + k < len(c))
+        sim_by_cost = {co: simulate_non_overlapping(
+            c, bt[eligible], sig[eligible], k, co) for co in COSTS_SIDE}
+        reference = sim_by_cost[COSTS_SIDE[1]]
+        n = reference["trade_count"]
+        gross = reference["gross_compounded"]
         row = dict(horizon=k, n=n, gross_total=gross, nets={})
         cells = []
         for co in COSTS_SIDE:
-            net = gross - n * 2 * co
+            net = sim_by_cost[co]["net_compounded"]
             row["nets"][f"{co}"] = net
             cells.append(f"{net*100:+10.2f}%")
         res["horizons"].append(row)
