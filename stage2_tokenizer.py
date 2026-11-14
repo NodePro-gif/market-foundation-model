@@ -332,6 +332,18 @@ def bpe_encode(chars, merge_arr, new_ids, mul=BPE_V):
 
 def step_c():
     log("STEP C - characterising bars, training BPE, encoding corpus")
+    # Remove stale token/label artifacts from symbols that are absent in the
+    # current corpus. Keeping old files would silently mix different datasets.
+    generated = ("bpe.npz", "vocab.json")
+    removed = 0
+    for name in os.listdir(OUT):
+        if (name in generated or name.startswith(
+                ("tok_", "year_", "year_end_", "lab_"))):
+            path = os.path.join(OUT, name)
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+    log(f"  cleared {removed} previous token/label artifacts")
     calib = np.load(f"{OUT}/calib.npz", allow_pickle=True)
     edges = {k: calib[k] for k in "aprdv"}
     km = pickle.load(open(f"{OUT}/kmeans.pkl", "rb"))
