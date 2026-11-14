@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import time
 
 import numpy as np
@@ -33,14 +34,15 @@ LOG = os.path.join(CKPT, "pretrain_log.json")
 
 # ------------------------------------------------------------------ config
 CTX = 512
-BATCH = int(os.environ.get("PRETRAIN_BATCH", "32"))
-ACCUM_STEPS = max(1, int(os.environ.get("PRETRAIN_ACCUM", "2")))
+BATCH = int(os.environ.get("PRETRAIN_BATCH", "64"))
+ACCUM_STEPS = max(1, int(os.environ.get("PRETRAIN_ACCUM", "1")))
 LR = float(os.environ.get("PRETRAIN_LR", "3e-4"))
 WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "300"))
 MAX_STEPS = int(os.environ.get("PRETRAIN_STEPS", "6000"))
 CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "1000"))
 EVAL_EVERY = int(os.environ.get("PRETRAIN_EVAL_EVERY", "250"))
-NUM_WORKERS = int(os.environ.get("PRETRAIN_WORKERS", "2"))
+NUM_WORKERS = int(os.environ.get("PRETRAIN_WORKERS", "4"))
+PREFETCH_FACTOR = max(2, int(os.environ.get("PRETRAIN_PREFETCH", "4")))
 RESUME = os.environ.get("PRETRAIN_RESUME", "0") == "1"
 SEED = int(os.environ.get("PRETRAIN_SEED", "42"))
 N_LAYER = 6
@@ -51,6 +53,12 @@ DROPOUT = 0.1
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if DEVICE.type == "cuda":
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+# Avoid CPU thread oversubscription when DataLoader workers are active.
+torch.set_num_threads(max(1, int(os.environ.get("MFM_CPU_THREADS", "4"))))
 t0 = time.time()
 
 
@@ -103,17 +111,30 @@ def tokenizer_fingerprint():
     return digest.hexdigest()
 
 
+def _mirror_checkpoint(path):
+    backup_dir = os.environ.get("MFM_CKPT_BACKUP_DIR")
+    if not backup_dir:
+        return
+    os.makedirs(backup_dir, exist_ok=True)
+    target = os.path.join(backup_dir, os.path.basename(path))
+    tmp = target + ".tmp"
+    shutil.copy2(path, tmp)
+    os.replace(tmp, target)
+
+
 def atomic_json(path, payload):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     os.replace(tmp, path)
+    _mirror_checkpoint(path)
 
 
 def atomic_torch_save(payload, path):
     tmp = path + ".tmp"
     torch.save(payload, tmp)
     os.replace(tmp, path)
+    _mirror_checkpoint(path)
 SYM_ID = {s: i for i, s in enumerate(SYMBOLS)}
 TF_ID = {t: i for i, t in enumerate(TF_LIST)}
 
@@ -123,8 +144,34 @@ _tok_mem = {}
 
 
 def _tok_cache(key):
+    # Expand compressed NPZ once to a local .npy, then mmap it. Worker processes
+    # share the OS page cache instead of each holding a full decompressed copy.
     if key not in _tok_mem:
-        _tok_mem[key] = np.load(f"{MKT}/tok_{key[0]}_{key[1]}.npz")
+        source = f"{MKT}/tok_{key[0]}_{key[1]}.npz"
+        cache_dir = os.path.join(MKT, ".cache_tokens")
+        os.makedirs(cache_dir, exist_ok=True)
+        stem = f"{key[0]}_{key[1]}"
+        cache_path = os.path.join(cache_dir, stem + ".npy")
+        meta_path = cache_path + ".json"
+        stat = os.stat(source)
+        expected = {"source_size": stat.st_size, "source_mtime_ns": stat.st_mtime_ns}
+        valid = False
+        if os.path.isfile(cache_path) and os.path.isfile(meta_path):
+            try:
+                with open(meta_path, encoding="utf-8") as fh:
+                    valid = json.load(fh) == expected
+            except (OSError, ValueError):
+                valid = False
+        if not valid:
+            tmp = cache_path + f".{os.getpid()}.tmp.npy"
+            with np.load(source) as archive:
+                np.save(tmp, archive["tokens"], allow_pickle=False)
+            os.replace(tmp, cache_path)
+            meta_tmp = meta_path + f".{os.getpid()}.tmp"
+            with open(meta_tmp, "w", encoding="utf-8") as fh:
+                json.dump(expected, fh)
+            os.replace(meta_tmp, meta_path)
+        _tok_mem[key] = np.load(cache_path, mmap_mode="r")
     return _tok_mem[key]
 
 
@@ -214,7 +261,7 @@ class MarketLMSmart(Dataset):
 
     def __getitem__(self, i):
         sym, tf, off, reg, sess = self.items[i]
-        t = _tok_cache((sym, tf))["tokens"][off: off + CTX - 5]
+        t = _tok_cache((sym, tf))[off: off + CTX - 5]
         ids = np.empty(len(t) + 5, dtype=np.int64)
         ids[0] = BOS
         ids[1] = SYM0 + SYM_ID[sym]
@@ -315,6 +362,11 @@ def main():
     model = MarketGPT().to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
+    if DEVICE.type == "cuda":
+        props = torch.cuda.get_device_properties(DEVICE)
+        log(f"GPU={props.name} VRAM={props.total_memory / 1024**3:.1f}GiB "
+            f"AMP=FP16 batch={BATCH} accum={ACCUM_STEPS} "
+            f"effective_batch={BATCH * ACCUM_STEPS}")
 
     # Fit on 2015-2020 and select the language-model checkpoint on 2021.
     # 2022 is reserved for calibration; 2023 remains the final untouched test.
@@ -330,6 +382,7 @@ def main():
                          pin_memory=DEVICE.type == "cuda")
     if NUM_WORKERS > 0:
         loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
     generator = torch.Generator().manual_seed(SEED)
     train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
                           drop_last=False, generator=generator, **loader_kwargs)
@@ -338,8 +391,13 @@ def main():
     if len(train_dl) == 0 or len(val_dl) == 0:
         raise SystemExit("train/validation loader is empty; reduce batch size or check data")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=LR,
-                            betas=(0.9, 0.95), weight_decay=0.1)
+    try:
+        opt = torch.optim.AdamW(model.parameters(), lr=LR,
+                                betas=(0.9, 0.95), weight_decay=0.1,
+                                fused=DEVICE.type == "cuda")
+    except TypeError:  # older PyTorch builds
+        opt = torch.optim.AdamW(model.parameters(), lr=LR,
+                                betas=(0.9, 0.95), weight_decay=0.1)
     total_steps = MAX_STEPS
 
     def lr_at(step):
