@@ -561,7 +561,10 @@ def main():
             tot, n = totals.tolist()
         if n == 0:
             raise RuntimeError("validation produced zero non-padding targets")
-        return tot / n
+        val_loss = tot / n
+        if not math.isfinite(val_loss):
+            raise RuntimeError(f"non-finite validation loss: {val_loss}")
+        return val_loss
 
     model.train()
     opt.zero_grad(set_to_none=True)
