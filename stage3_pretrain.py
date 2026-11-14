@@ -8,6 +8,7 @@ with AMP fp16, periodic checkpointing to /content/ckpt.
 Held-out rule: 2023 tokens and HELD_OUT symbols are excluded from pretraining.
 """
 
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -18,7 +19,12 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
-from training_utils import PlateauScale, perplexity_from_loss, warmup_cosine_lr
+import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+from training_utils import (EarlyStopping, ExactDistributedEvalSampler,
+                            PlateauScale, perplexity_from_loss, warmup_cosine_lr)
 from torch.utils.data import DataLoader, Dataset
 
 IS_COLAB = os.path.isdir("/content")
@@ -42,6 +48,8 @@ WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "150"))
 PLATEAU_PATIENCE = int(os.environ.get("PRETRAIN_PLATEAU_PATIENCE", "2"))
 PLATEAU_FACTOR = float(os.environ.get("PRETRAIN_PLATEAU_FACTOR", "0.5"))
 MIN_LR_SCALE = float(os.environ.get("PRETRAIN_MIN_LR_SCALE", "0.125"))
+EARLY_STOP_PATIENCE = int(os.environ.get("PRETRAIN_EARLY_STOP_PATIENCE", "8"))
+EARLY_STOP_MIN_DELTA = float(os.environ.get("PRETRAIN_EARLY_STOP_MIN_DELTA", "1e-4"))
 MAX_STEPS = int(os.environ.get("PRETRAIN_STEPS", "6000"))
 CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "1000"))
 EVAL_EVERY = int(os.environ.get("PRETRAIN_EVAL_EVERY", "250"))
@@ -54,9 +62,20 @@ N_HEAD = 8
 N_EMBD = 384              # 6 * 384^2 * 12 ~= 10.6M + heads/embeds ~= 12M
 DROPOUT = 0.1
 
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
+RANK = int(os.environ.get("RANK", "0"))
+LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
+DISTRIBUTED = WORLD_SIZE > 1
+if DISTRIBUTED:
+    if not torch.cuda.is_available():
+        raise RuntimeError("DDP requires CUDA on every worker")
+    torch.cuda.set_device(LOCAL_RANK)
+    dist.init_process_group(backend="nccl", init_method="env://")
+IS_MAIN = RANK == 0
+
+torch.manual_seed(SEED + RANK)
+np.random.seed(SEED + RANK)
+DEVICE = torch.device(f"cuda:{LOCAL_RANK}" if torch.cuda.is_available() else "cpu")
 if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
@@ -67,7 +86,15 @@ t0 = time.time()
 
 
 def log(m):
-    print(f"[{time.time()-t0:7.1f}s] {m}", flush=True)
+    if IS_MAIN:
+        print(f"[{time.time()-t0:7.1f}s] {m}", flush=True)
+
+def sync_workers():
+    if DISTRIBUTED:
+        dist.barrier()
+
+def unwrap_model(net):
+    return net.module if isinstance(net, DDP) else net
 
 
 vocab = json.load(open(f"{MKT}/vocab.json"))
@@ -304,7 +331,8 @@ class CausalSelfAttention(nn.Module):
             dropout_p=self.drop.p if self.training else 0.0,
             is_causal=True,
         )
-        return self.drop(y).transpose(1, 2).contiguous().view(B, T, C)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.drop(self.proj(y))
 
 
 class Block(nn.Module):
@@ -373,13 +401,17 @@ def main():
         log("torch.compile unavailable in this PyTorch build; using eager execution")
     if DEVICE.type == "cuda":
         torch.cuda.reset_peak_memory_stats(DEVICE)
+    if DISTRIBUTED:
+        model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK,
+                    broadcast_buffers=False)
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
     if DEVICE.type == "cuda":
         props = torch.cuda.get_device_properties(DEVICE)
         log(f"GPU={props.name} VRAM={props.total_memory / 1024**3:.1f}GiB "
             f"AMP=FP16 batch={BATCH} accum={ACCUM_STEPS} "
-            f"effective_batch={BATCH * ACCUM_STEPS}")
+            f"effective_global_batch={BATCH * ACCUM_STEPS * WORLD_SIZE} "
+            f"world_size={WORLD_SIZE}")
 
     # Fit on 2015-2020 and select the language-model checkpoint on 2021.
     # 2022 is reserved for calibration; 2023 remains the final untouched test.
@@ -397,10 +429,17 @@ def main():
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
     generator = torch.Generator().manual_seed(SEED)
-    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
-                          drop_last=False, generator=generator, **loader_kwargs)
-    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,
-                        drop_last=False, **loader_kwargs)
+    train_sampler = DistributedSampler(
+        train_ds, num_replicas=WORLD_SIZE, rank=RANK, shuffle=True,
+        seed=SEED, drop_last=False) if DISTRIBUTED else None
+    val_sampler = ExactDistributedEvalSampler(
+        val_ds, num_replicas=WORLD_SIZE, rank=RANK) if DISTRIBUTED else None
+    train_dl = DataLoader(
+        train_ds, batch_size=BATCH, shuffle=train_sampler is None,
+        sampler=train_sampler, drop_last=False, generator=generator, **loader_kwargs)
+    val_dl = DataLoader(
+        val_ds, batch_size=BATCH, shuffle=False, sampler=val_sampler,
+        drop_last=False, **loader_kwargs)
     if len(train_dl) == 0 or len(val_dl) == 0:
         raise SystemExit("train/validation loader is empty; reduce batch size or check data")
 
@@ -417,6 +456,8 @@ def main():
         patience=PLATEAU_PATIENCE, factor=PLATEAU_FACTOR,
         min_scale=MIN_LR_SCALE,
     )
+    early_stopper = EarlyStopping(
+        patience=EARLY_STOP_PATIENCE, min_delta=EARLY_STOP_MIN_DELTA)
 
     def lr_at(step):
         return warmup_cosine_lr(
@@ -435,7 +476,7 @@ def main():
         state = torch.load(resume_path, map_location="cpu", weights_only=False)
         if state.get("tokenizer_fingerprint") != fingerprint:
             raise RuntimeError("resume checkpoint tokenizer fingerprint mismatch")
-        model.load_state_dict(state["model"])
+        unwrap_model(model).load_state_dict(state["model"])
         opt.load_state_dict(state["optimizer"])
         scaler.load_state_dict(state["scaler"])
         step = int(state["step"])
@@ -447,12 +488,30 @@ def main():
             # Backward-compatible resume from checkpoints created before
             # the adaptive validation-loss controller was introduced.
             lr_controller.best = best_val
-        if state.get("loader_rng") is not None:
-            generator.set_state(state["loader_rng"])
-        torch.set_rng_state(state["torch_rng"])
-        np.random.set_state(state["numpy_rng"])
-        if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
-            torch.cuda.set_rng_state_all(state["cuda_rng"])
+        if state.get("early_stopper") is not None:
+            early_stopper.load_state_dict(state["early_stopper"])
+        elif math.isfinite(best_val):
+            early_stopper.best = best_val
+        rank_rng = state.get("rank_rng")
+        if rank_rng is not None:
+            rng = rank_rng[RANK]
+            torch.set_rng_state(rng["torch_rng"])
+            np.random.set_state(rng["numpy_rng"])
+            generator.set_state(rng["loader_rng"])
+            if DEVICE.type == "cuda" and rng.get("cuda_rng") is not None:
+                torch.cuda.set_rng_state(rng["cuda_rng"], device=DEVICE)
+        else:
+            # Backward-compatible restore from older single-rank checkpoints.
+            if state.get("loader_rng") is not None:
+                generator.set_state(state["loader_rng"])
+            torch.set_rng_state(state["torch_rng"])
+            np.random.set_state(state["numpy_rng"])
+            if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
+                cuda_rng = state["cuda_rng"]
+                if isinstance(cuda_rng, (list, tuple)) and len(cuda_rng) > LOCAL_RANK:
+                    torch.cuda.set_rng_state(cuda_rng[LOCAL_RANK], device=DEVICE)
+                elif RANK == 0:
+                    torch.cuda.set_rng_state_all(cuda_rng)
         best_path = os.path.join(CKPT, "best.pt")
         manifest_ok = False
         if os.path.isfile(best_path) and os.path.isfile(manifest_path):
@@ -464,17 +523,26 @@ def main():
             )
         if not manifest_ok:
             best_val = float("inf")
-            for stale in (best_path, manifest_path):
-                if os.path.isfile(stale):
-                    os.remove(stale)
-            log("previous best checkpoint/manifest unavailable; will select a new best")
+            lr_controller.best = float("inf")
+            lr_controller.bad_evals = 0
+            lr_controller.scale = 1.0
+            early_stopper.best = float("inf")
+            early_stopper.bad_evals = 0
+            if IS_MAIN:
+                for stale in (best_path, manifest_path):
+                    if os.path.isfile(stale):
+                        os.remove(stale)
+                log("previous best checkpoint/manifest unavailable; will select a new best")
+            sync_workers()
         log(f"resumed from step {step}, best_val={best_val:.5f}")
     else:
-        # A fresh run must never leave an older best checkpoint eligible for use.
-        for stale in (os.path.join(CKPT, "best.pt"), manifest_path, resume_path):
-            if os.path.isfile(stale):
-                os.remove(stale)
-        log("starting fresh pretraining run")
+        # Only rank 0 mutates shared checkpoint files.
+        if IS_MAIN:
+            for stale in (os.path.join(CKPT, "best.pt"), manifest_path, resume_path):
+                if os.path.isfile(stale):
+                    os.remove(stale)
+            log("starting fresh pretraining run")
+        sync_workers()
 
     def evaluate():
         model.eval()
@@ -489,15 +557,26 @@ def main():
                 tot += loss.item() * valid_tokens
                 n += valid_tokens
         model.train()
+        if DISTRIBUTED:
+            totals = torch.tensor([tot, n], dtype=torch.float64, device=DEVICE)
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+            tot, n = totals.tolist()
         if n == 0:
             raise RuntimeError("validation produced zero non-padding targets")
-        return tot / n
+        val_loss = tot / n
+        if not math.isfinite(val_loss):
+            raise RuntimeError(f"non-finite validation loss: {val_loss}")
+        return val_loss
 
     model.train()
     opt.zero_grad(set_to_none=True)
     perf_t0 = time.time()
     perf_windows = 0
-    while step < MAX_STEPS:
+    epoch = 0
+    stop_training = False
+    while step < MAX_STEPS and not stop_training:
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         for i, batch in enumerate(train_dl):
             if step >= MAX_STEPS:
                 break
@@ -508,11 +587,15 @@ def main():
             perf_windows += int(xb.shape[0])
             group_start = (i // ACCUM_STEPS) * ACCUM_STEPS
             group_size = min(ACCUM_STEPS, len(train_dl) - group_start)
-            with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
-                                enabled=DEVICE.type == "cuda"):
-                _, loss = model(xb, xb)
-            scaler.scale(loss / group_size).backward()
             update_now = ((i + 1) % ACCUM_STEPS == 0) or (i + 1 == len(train_dl))
+            # DDP should all-reduce gradients only on the final micro-batch.
+            sync_context = (model.no_sync() if DISTRIBUTED and not update_now
+                            else nullcontext())
+            with sync_context:
+                with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
+                                    enabled=DEVICE.type == "cuda"):
+                    _, loss = model(xb, xb)
+                scaler.scale(loss / group_size).backward()
             if update_now:
                 scaler.unscale_(opt)
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -524,7 +607,7 @@ def main():
                 step += 1
                 if step % 50 == 0:
                     elapsed = max(time.time() - perf_t0, 1e-6)
-                    windows_s = perf_windows / elapsed
+                    windows_s = perf_windows * WORLD_SIZE / elapsed
                     peak_gib = (torch.cuda.max_memory_allocated(DEVICE) / 1024**3
                                 if DEVICE.type == "cuda" else 0.0)
                     log(f"step {step:>5} loss={loss.item():.4f} "
@@ -535,6 +618,7 @@ def main():
                 if step % EVAL_EVERY == 0:
                     vl = evaluate()
                     hist.append(dict(step=step, val_loss=vl, train_loss=loss.item()))
+                    should_stop = early_stopper.observe(vl)
                     old_scale = lr_controller.scale
                     new_scale = lr_controller.observe(vl)
                     log(f"  EVAL step {step}: val_loss={vl:.4f} "
@@ -543,37 +627,66 @@ def main():
                     if new_scale < old_scale:
                         log(f"  validation loss plateaued; LR multiplier "
                             f"{old_scale:.3f} -> {new_scale:.3f}")
+                    if should_stop:
+                        log(f"  early stopping: no meaningful validation improvement for {EARLY_STOP_PATIENCE} evaluations")
+                        stop_training = True
                     if vl < best_val:
                         best_val = vl
-                        atomic_torch_save(model.state_dict(), f"{CKPT}/best.pt")
-                        atomic_json(manifest_path, dict(
-                            tokenizer_fingerprint=fingerprint,
-                            vocab_size=VOCAB, context_length=CTX,
-                            n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
-                            train_years=[2015, 2020], checkpoint_selection_year=2021,
-                            global_step=step, best_validation_loss=vl,
-                            checkpoint_sha256=sha256_file(os.path.join(CKPT, "best.pt")),
-                        ))
-                        log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
+                        if IS_MAIN:
+                            atomic_torch_save(unwrap_model(model).state_dict(), f"{CKPT}/best.pt")
+                            atomic_json(manifest_path, dict(
+                                tokenizer_fingerprint=fingerprint,
+                                vocab_size=VOCAB, context_length=CTX,
+                                n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
+                                train_years=[2015, 2020], checkpoint_selection_year=2021,
+                                global_step=step, best_validation_loss=vl,
+                                checkpoint_sha256=sha256_file(os.path.join(CKPT, "best.pt")),
+                            ))
+                            log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
+                        sync_workers()
                 if step % CKPT_EVERY == 0:
-                    atomic_torch_save(dict(
-                        model=model.state_dict(), optimizer=opt.state_dict(),
-                        scaler=scaler.state_dict(), step=step, best_val=best_val,
-                        lr_controller=lr_controller.state_dict(),
-                        history=hist, tokenizer_fingerprint=fingerprint,
-                        torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
+                    local_rng = dict(
+                        torch_rng=torch.get_rng_state(),
+                        numpy_rng=np.random.get_state(),
                         loader_rng=generator.get_state(),
-                        cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
-                    ), os.path.join(CKPT, "resume.pt"))
-                    atomic_json(LOG, hist)
-                    log(f"saved resumable checkpoint at step {step}")
+                        cuda_rng=torch.cuda.get_rng_state(DEVICE) if DEVICE.type == "cuda" else None,
+                    )
+                    if DISTRIBUTED:
+                        gathered_rng = [None] * WORLD_SIZE if IS_MAIN else None
+                        dist.gather_object(local_rng, gathered_rng, dst=0)
+                    else:
+                        gathered_rng = [local_rng]
+                    if IS_MAIN:
+                        atomic_torch_save(dict(
+                            model=unwrap_model(model).state_dict(), optimizer=opt.state_dict(),
+                            scaler=scaler.state_dict(), step=step, best_val=best_val,
+                            lr_controller=lr_controller.state_dict(),
+                            early_stopper=early_stopper.state_dict(),
+                            history=hist, tokenizer_fingerprint=fingerprint,
+                            rank_rng=gathered_rng,
+                            torch_rng=local_rng["torch_rng"], numpy_rng=local_rng["numpy_rng"],
+                            loader_rng=local_rng["loader_rng"],
+                            cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
+                        ), os.path.join(CKPT, "resume.pt"))
+                        atomic_json(LOG, hist)
+                        log(f"saved resumable checkpoint at step {step}")
+                    sync_workers()
 
-    atomic_torch_save(model.state_dict(), f"{CKPT}/final.pt")
-    atomic_json(LOG, hist)
-    log(f"DONE best_val={best_val:.4f} best_ppl={perplexity_from_loss(best_val):.4f} "
-        f"params={n_params/1e6:.2f}M batch={BATCH} accum={ACCUM_STEPS}")
-    print("STAGE3 DONE", flush=True)
+            if stop_training:
+                break
+        epoch += 1
+
+    if IS_MAIN:
+        atomic_torch_save(unwrap_model(model).state_dict(), f"{CKPT}/final.pt")
+        atomic_json(LOG, hist)
+        log(f"DONE best_val={best_val:.4f} best_ppl={perplexity_from_loss(best_val):.4f} "
+            f"params={n_params/1e6:.2f}M batch={BATCH} accum={ACCUM_STEPS} "
+            f"world_size={WORLD_SIZE} early_stopped={stop_training}")
+        print("STAGE3 DONE", flush=True)
+    sync_workers()
+    if DISTRIBUTED:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    record(main)()

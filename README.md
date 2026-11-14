@@ -121,9 +121,20 @@ The downloader may report unavailable source files. Review its summary and the d
 The training scripts use the paths and configuration defined in their source files. On a Colab GPU runtime, prepare the token artifacts under `/content/mkt` and run:
 
 ```bash
+# Colab / single GPU
 python stage3_pretrain.py
+
+# Kaggle with two GPUs (the Kaggle notebook uses this command)
+torchrun --standalone --nnodes=1 --nproc_per_node=2 stage3_pretrain.py
+
+# Fine-tuning, 2021 checkpoint selection, 2022 calibration,
+# then the locked 2023 final evaluation and portfolio report
 python stage4_finetune.py
+python validate_stage4.py
+python backtest_stage4.py
 ```
+
+The 2022 protocol is chronological and disjoint: Jan–Jun fits Platt probability calibration; Jul–Dec selects the threshold and holding horizon. If either period cannot produce a valid policy with the minimum trade count, evaluation stops before constructing 2023 data. After a successful final evaluation, `results/finetune/FINAL_TEST_2023_ACCESSED.lock` prevents accidental repeat access; an intentional rerun requires `MFM_ALLOW_FINAL_TEST_RERUN=1`. Do not rerun validate_stage4.py to tune a strategy after viewing 2023. For a new research iteration, change the model/policy using training and validation periods, then preserve a fresh untouched final period.
 
 For the fine-tuning script, selected settings can be overridden through environment variables:
 
@@ -163,7 +174,7 @@ For pretraining on Colab T4, the notebook defaults to micro-batch 64 with 1 grad
 
 Fine-tuning now uses AdamW with linear warmup followed by cosine decay, gradient clipping, and early stopping based only on XAUUSD 2021 validation AUC. Multi-task prediction heads use LayerNorm, a 128-unit GELU layer, and dropout to regularize the shared-backbone outputs. The default 3 epochs are a ceiling; training may stop earlier. The pretrained GPT backbone architecture and parameter shapes are intentionally preserved so the regenerated Stage-3 checkpoint remains load-compatible; architecture changes that alter tensor shapes require a complete fresh pretraining run.
 
-The final portfolio simulator is sequential and non-overlapping: it holds at most one position, ignores new signals until exit, compounds returns, and applies entry/exit costs multiplicatively. Validation threshold and holding horizon are selected with the same portfolio logic on 2022 before the locked 2023 test. This is still a simplified bar-close simulator; broker-specific spread, slippage, financing, latency and execution rules must be supplied before live use.
+The final-test boundary is enforced in code: `stage4_finetune.py` trains and selects checkpoints using 2015–2020 and 2021 only; it does not construct 2023 datasets or write test predictions. `validate_stage4.py` first calibrates probabilities and selects threshold plus holding horizon using 2022, then performs the final 2023 inference and evaluates only that locked policy (no threshold/horizon sweep on 2023). `backtest_stage4.py` reports the validation-locked policy with sequential, non-overlapping positions, compounding and multiplicative entry/exit costs. This remains a simplified bar-close simulator; broker-specific spread, variable slippage, financing, latency, partial fills, rejected orders and execution rules must be modeled and independently verified before live use.
 
 The Colab notebook uses `PRETRAIN_BATCH=64`, `PRETRAIN_ACCUM=1` (effective batch 64), `PRETRAIN_STEPS=6000`, `PRETRAIN_WARMUP=150`, `PRETRAIN_CKPT_EVERY=1000`, `PRETRAIN_EVAL_EVERY=500`, `PRETRAIN_WORKERS=4`, `PRETRAIN_PREFETCH=4`, and `PRETRAIN_RESUME=1`. Both training stages optionally compile the model and log throughput/peak VRAM; compare steady-state throughput after compile warm-up and set `MFM_TORCH_COMPILE=0` if compilation is unsupported or slower. Resume restores model/optimizer state and RNG state; the current DataLoader epoch restarts, so a few batches can be repeated. If tokenizer artifacts are regenerated, remove the old `ckpt/resume.pt` before starting a fresh run. Generated checkpoints under `ckpt/` are intentionally excluded from Git.
 

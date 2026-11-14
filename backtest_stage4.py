@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run the validation-locked policy as a sequential, non-overlapping portfolio."""
+"""Run the validation-locked policy using saved final-test predictions and bars."""
 import json
 import os
 
@@ -15,8 +15,21 @@ OUT = s4.OUT
 def main():
     validation_path = os.path.join(OUT, "validation.json")
     pred_path = os.path.join(OUT, "test_pred_cal.npy")
-    if not os.path.isfile(validation_path) or not os.path.isfile(pred_path):
-        raise SystemExit("missing validation.json or test_pred_cal.npy; run validate_stage4.py first")
+    bars_path = os.path.join(OUT, "test_bars.npy")
+    labels_path = os.path.join(OUT, "test_y.npy")
+    lock_path = os.path.join(OUT, "FINAL_TEST_2023_ACCESSED.lock")
+    backtest_lock = os.path.join(OUT, "BACKTEST_2023_ACCESSED.lock")
+    if os.path.exists(backtest_lock) and os.environ.get("MFM_ALLOW_FINAL_TEST_RERUN") != "1":
+        raise SystemExit("2023 backtest lock exists; set MFM_ALLOW_FINAL_TEST_RERUN=1 only for an explicitly authorized rerun")
+    required = (validation_path, pred_path, bars_path, labels_path, lock_path)
+    missing = [path for path in required if not os.path.isfile(path)]
+    if missing:
+        raise SystemExit(
+            "missing locked validation artifacts: "
+            + ", ".join(os.path.basename(path) for path in missing)
+            + "; run validate_stage4.py first"
+        )
+
     with open(validation_path, encoding="utf-8") as fh:
         validation = json.load(fh)
     threshold = float(validation["threshold"])
@@ -26,13 +39,19 @@ def main():
     horizon = int(horizon)
 
     pred = np.load(pred_path)
-    y = np.load(os.path.join(OUT, "test_y.npy"))
-    ds = s4.FinetuneDS(s4.TARGET_SYM, years=[2023], stride=s4.TEST_STRIDE)
-    if len(ds.bars) != len(pred) or len(y) != len(pred):
-        raise SystemExit("prediction/window mismatch; rerun stage4 and validation with identical settings")
+    y = np.load(labels_path)
+    bars = np.asarray(np.load(bars_path), dtype=np.int64)
+    if len(bars) != len(pred) or len(y) != len(pred):
+        raise SystemExit(
+            "saved final-test bars/prediction/label mismatch; "
+            "rerun validation only with explicit final-test rerun authorization"
+        )
 
+    # Record the one-shot backtest access before reading final-period prices.
+    with open(backtest_lock, "w", encoding="utf-8") as lock:
+        lock.write("2023 portfolio backtest executed using the locked policy")
+    # The 2023 model dataset is not reconstructed or re-inferred here.
     lab = np.load(os.path.join(s4.MKT, f"lab_{s4.TARGET_SYM}.npz"))
-    bars = np.asarray(ds.bars, dtype=np.int64)
     close = lab["c"].astype(np.float64)
     ts = lab["ts"]
     valid = bars + horizon < len(close)
