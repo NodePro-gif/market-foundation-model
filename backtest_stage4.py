@@ -18,6 +18,9 @@ def main():
     bars_path = os.path.join(OUT, "test_bars.npy")
     labels_path = os.path.join(OUT, "test_y.npy")
     lock_path = os.path.join(OUT, "FINAL_TEST_2023_ACCESSED.lock")
+    backtest_lock = os.path.join(OUT, "BACKTEST_2023_ACCESSED.lock")
+    if os.path.exists(backtest_lock) and os.environ.get("MFM_ALLOW_FINAL_TEST_RERUN") != "1":
+        raise SystemExit("2023 backtest lock exists; set MFM_ALLOW_FINAL_TEST_RERUN=1 only for an explicitly authorized rerun")
     required = (validation_path, pred_path, bars_path, labels_path, lock_path)
     missing = [path for path in required if not os.path.isfile(path)]
     if missing:
@@ -44,8 +47,10 @@ def main():
             "rerun validation only with explicit final-test rerun authorization"
         )
 
-    # This is the first and only market-price load in the backtest process;
-    # the 2023 model dataset is not reconstructed or re-inferred here.
+    # Record the one-shot backtest access before reading final-period prices.
+    with open(backtest_lock, "w", encoding="utf-8") as lock:
+        lock.write("2023 portfolio backtest executed using the locked policy")
+    # The 2023 model dataset is not reconstructed or re-inferred here.
     lab = np.load(os.path.join(s4.MKT, f"lab_{s4.TARGET_SYM}.npz"))
     close = lab["c"].astype(np.float64)
     ts = lab["ts"]
