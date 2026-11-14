@@ -117,11 +117,15 @@ For the fine-tuning script, selected settings can be overridden through environm
 | Variable | Default | Meaning |
 |---|---:|---|
 | `ST4_EPOCHS` | 3 | Fine-tuning epochs |
-| `ST4_BATCH` | 256 | Batch size |
+| `ST4_BATCH` | 32 | GPU micro-batch |
+| `ST4_ACCUM` | 8 | Gradient-accumulation steps (effective batch 256) |
 | `ST4_LR` | 0.0001 | Learning rate |
 | `ST4_STRIDE` | 32 | Balanced multi-asset training-window stride |
-| `ST4_TEST_STRIDE` | 4 | Test-window stride |
-| `ST4_HELD_STRIDE` | 8 | Held-out asset stride |
+| `ST4_VAL_STRIDE` | 4 | XAUUSD 2021 checkpoint-selection stride |
+| `ST4_TEST_STRIDE` | 4 | Calibration/final-test inference stride |
+| `ST4_HELD_STRIDE` | 8 | Held-out asset evaluation stride |
+| `ST4_AMP` | 1 | Enable FP16 mixed precision on CUDA |
+| `ST4_WORKERS` | 0 | DataLoader worker processes |
 
 Example for a smaller CPU run (PowerShell):
 
@@ -137,6 +141,8 @@ python -u stage4_finetune.py
 **Current research protocol:** fit tokenizer statistics and BPE on non-held-out assets from 2015–2020; pretrain on 2015–2020 and select the pretraining checkpoint on 2021; fine-tune on 2015–2020 and select the supervised checkpoint on 2021; calibrate on 2022; reserve 2023 as the final test. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; committed checkpoints and historical metrics predate the corrected protocol.
 
 For pretraining on Colab T4, the notebook defaults to micro-batch 32 with 2 gradient-accumulation steps (effective batch 64), FP16 AMP and periodic resumable checkpoints. Fine-tuning defaults to micro-batch 32 with 8 accumulation steps (effective batch 256) and samples training windows with equal probability per non-held-out asset; checkpoint selection remains XAUUSD 2021. These are starting configurations, not guaranteed optimal settings for every runtime. Tune them only using training/validation behavior, never the final test set.
+
+Pretraining controls are `PRETRAIN_BATCH=32`, `PRETRAIN_ACCUM=2` (effective batch 64), `PRETRAIN_STEPS=6000`, `PRETRAIN_CKPT_EVERY=1000`, `PRETRAIN_EVAL_EVERY=250`, `PRETRAIN_WORKERS=2`, and `PRETRAIN_RESUME=1`. Resume restores model/optimizer state and RNG state; the current DataLoader epoch restarts, so a few windows can be repeated. If tokenizer artifacts are regenerated, remove the old `ckpt/resume.pt` before starting a fresh run.
 
 For a full reproduction, follow [Reproducibility and data protocol](docs/REPRODUCIBILITY.md) and the experiment notes in [PROGRESS.md](PROGRESS.md). Do not compare runs unless their data split, stride, seed, model checkpoint and cost assumptions match.
 
