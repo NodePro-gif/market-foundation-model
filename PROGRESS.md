@@ -5,7 +5,7 @@
 ## 2026-11-14 — hardening pipeline dan Google Colab T4
 
 - Menghapus pasangan BPE sintetis antar-aset/timeframe dengan sentinel batas; sampel BPE sekarang berupa potongan candle berurutan yang tersebar sepanjang 2015–2020.
-- Mengikat checkpoint pretraining ke SHA-256 vocab.json + bpe.npz melalui best_manifest.json; fine-tuning menolak checkpoint lama/tidak cocok.
+- Mengikat checkpoint pretraining ke SHA-256 vocab.json + bpe.npz + calib.npz + kmeans.pkl melalui best_manifest.json; fine-tuning menolak checkpoint lama/tidak cocok.
 - Memindahkan pemeriksaan checkpoint ke validasi 2021; tidak lagi membaca final test 2023.
 - Pretraining memakai SDPA, FP16 AMP, gradient accumulation, evaluasi seluruh validation split, dan checkpoint resumable.
 - Fine-tuning memakai AMP, gradient accumulation, sampling seimbang lintas aset non-held-out; checkpoint dipilih pada XAUUSD 2021.
