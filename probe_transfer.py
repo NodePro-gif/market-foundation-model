@@ -9,8 +9,9 @@ XAUUSD-specific mapping, not a symbol-agnostic one.
 This probe:
   * FREEZES the pretrained backbone (cheap: forward only) - also tests
     whether the pretrained representations transfer at all,
-  * trains dir/vol/quantile heads on all non-held M5 symbols 2015-2022,
-  * evaluates on the held-out symbols 2023 + XAUUSD 2023 for comparison.
+  * trains direction/volatility/quantile heads on non-held-out symbols 2015-2020,
+  * evaluates on 2023 as an exploratory diagnostic only (not an independent
+    benchmark if the same final-test period has already been inspected).
 
 Usage:
     $env:TR_STRIDE="1536"; $env:TR_EPOCHS="2"; $env:TR_BATCH="64"
@@ -34,7 +35,7 @@ OUT = s4.OUT
 HELD = s4.HELD
 TRAIN_SYM = [s for s in s3.SYMBOLS if s not in HELD and s != "XAUUSD"] + \
             ["XAUUSD"]                       # XAUUSD last so it is comparable
-YEARS = tuple(range(2015, 2023))
+YEARS = tuple(range(2015, 2021))
 
 STRIDE = int(os.environ.get("TR_STRIDE", 1536))
 EPOCHS = int(os.environ.get("TR_EPOCHS", 2))
@@ -78,8 +79,11 @@ def evaluate(model, sym, year, stride=EVAL_STRIDE):
     ps, ys, regs = [], [], []
     with torch.no_grad():
         for xb, yd, yv, *_ in DataLoader(ds, batch_size=BATCH, shuffle=False):
-            pd, _, _ = model(xb)
-            ps.append(torch.sigmoid(pd).numpy())
+            xb = xb.to(s4.DEVICE)
+            with torch.autocast(device_type=s4.DEVICE.type, dtype=torch.float16,
+                                enabled=s4.DEVICE.type == "cuda" and s4.USE_AMP):
+                pd, _, _ = model(xb)
+            ps.append(torch.sigmoid(pd).float().cpu().numpy())
             ys.append(yd.numpy() if torch.is_tensor(yd) else np.asarray(yd))
     p, y = np.concatenate(ps), np.concatenate(ys)
     brier = float(((p - y) ** 2).mean())
@@ -91,9 +95,8 @@ def main():
     log(f"train symbols={len(TRAIN_SYM)} stride={STRIDE} epochs={EPOCHS} "
         f"batch={BATCH} lr={LR} (backbone FROZEN)")
 
-    base = s4.load_base(os.environ.get("CKPT") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "ckpt", "best.pt"))
-    model = s4.FinetuneGPT(base)
+    base = s4.load_base(os.environ.get("CKPT") or os.path.join(s3.CKPT, "best.pt"))
+    model = s4.FinetuneGPT(base).to(s4.DEVICE)
     sd = torch.load(f"{OUT}/best.pt", map_location="cpu", weights_only=True)
     model.load_state_dict(sd)              # start from the XAUUSD fine-tune
     for p in model.backbone.parameters():
@@ -115,7 +118,7 @@ def main():
     ds = ConcatDataset(parts)
     log(f"total train windows: {len(ds):,}")
 
-    dl = DataLoader(ds, batch_size=BATCH, shuffle=True, drop_last=True)
+    dl = DataLoader(ds, batch_size=BATCH, shuffle=True, drop_last=False)
     model.train()
     model.backbone.eval()                  # frozen -> no dropout noise
     crit_bce = nn.BCEWithLogitsLoss()
@@ -124,22 +127,28 @@ def main():
         tot = dict(d=0.0, v=0.0, q=0.0, n=0)
         ps, ys = [], []
         for i, (xb, yd, yv, yq, vq) in enumerate(dl):
+            xb = xb.to(s4.DEVICE)
+            yd, yv, yq, vq = yd.to(s4.DEVICE), yv.to(s4.DEVICE), yq.to(s4.DEVICE), vq.to(s4.DEVICE)
             opt.zero_grad(set_to_none=True)
-            pd, pv, pq = model(xb)
-            l_d = crit_bce(pd, yd.float())
-            l_v = nn.functional.cross_entropy(pv, yv)
-            l_q = s4.pinball(pq, yq, vq)
-            loss = l_d + l_v + 0.5 * l_q
-            loss.backward()
+            with torch.autocast(device_type=s4.DEVICE.type, dtype=torch.float16,
+                                enabled=s4.DEVICE.type == "cuda" and s4.USE_AMP):
+                pd, pv, pq = model(xb)
+                l_d = crit_bce(pd, yd.float())
+                l_v = nn.functional.cross_entropy(pv, yv)
+                l_q = s4.pinball(pq, yq, vq)
+                loss = l_d + l_v + 0.5 * l_q
+            s4.SCALER.scale(loss).backward()
+            s4.SCALER.unscale_(opt)
             nn.utils.clip_grad_norm_(heads, 1.0)
-            opt.step()
+            s4.SCALER.step(opt)
+            s4.SCALER.update()
             b = len(xb)
             tot["d"] += l_d.item() * b
             tot["v"] += l_v.item() * b
             tot["q"] += l_q.item() * b
             tot["n"] += b
-            ps.append(pd.detach().numpy())
-            ys.append(yd.numpy() if torch.is_tensor(yd) else np.asarray(yd))
+            ps.append(pd.detach().float().cpu().numpy())
+            ys.append(yd.detach().cpu().numpy())
             if i % max(1, n_steps // 8) == 0:
                 el = time.time() - t0
                 eta = el * (n_steps - i - 1) / max(i + 1, 1)
@@ -179,7 +188,7 @@ def main():
 
     with open(f"{OUT}/transfer.json", "w") as fh:
         json.dump(res, fh, indent=1)
-    torch.save(model.state_dict(), f"{OUT}/transfer_best.pt")
+    s4.s3.atomic_torch_save(model.state_dict(), f"{OUT}/transfer_best.pt")
     log(f"wrote {OUT}/transfer.json")
     print("TRANSFER DONE", flush=True)
 
