@@ -85,3 +85,13 @@ def test_backtest_reuses_saved_final_test_bars_instead_of_rebuilding_2023_datase
     assert 'test_bars.npy' in source
     assert 'FINAL_TEST_2023_ACCESSED.lock' in source
     assert 'BACKTEST_2023_ACCESSED.lock' in source
+
+def test_finetune_checkpoint_mirror_is_separate_from_pretraining_checkpoint():
+    source = (ROOT / "stage4_finetune.py").read_text(encoding="utf-8")
+    notebook = (ROOT / "notebooks/Market_Foundation_Model_Kaggle_GPU.ipynb").read_text(
+        encoding="utf-8"
+    )
+    assert "def atomic_ft_save(" in source
+    assert "s3.atomic_torch_save(model.state_dict(), best_path)" not in source
+    assert "MFM_FT_BACKUP_DIR" in source
+    assert "MFM_FT_BACKUP_DIR" in notebook
