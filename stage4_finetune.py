@@ -245,6 +245,8 @@ def load_base(ckpt_path):
             "pretraining checkpoint/tokenizer fingerprint mismatch; "
             "run stage3_pretrain.py again"
         )
+    if manifest.get("checkpoint_sha256") != s3.sha256_file(ckpt_path):
+        raise RuntimeError("pretraining checkpoint bytes do not match best_manifest.json")
     base = s3.MarketGPT()
     sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     base.load_state_dict(sd)
