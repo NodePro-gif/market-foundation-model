@@ -8,6 +8,7 @@ with AMP fp16, periodic checkpointing to /content/ckpt.
 Held-out rule: 2023 tokens and HELD_OUT symbols are excluded from pretraining.
 """
 
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -21,7 +22,8 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-from training_utils import PlateauScale, perplexity_from_loss, warmup_cosine_lr
+from training_utils import (EarlyStopping, ExactDistributedEvalSampler,
+                            PlateauScale, perplexity_from_loss, warmup_cosine_lr)
 from torch.utils.data import DataLoader, Dataset
 
 IS_COLAB = os.path.isdir("/content")
@@ -45,6 +47,8 @@ WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "150"))
 PLATEAU_PATIENCE = int(os.environ.get("PRETRAIN_PLATEAU_PATIENCE", "2"))
 PLATEAU_FACTOR = float(os.environ.get("PRETRAIN_PLATEAU_FACTOR", "0.5"))
 MIN_LR_SCALE = float(os.environ.get("PRETRAIN_MIN_LR_SCALE", "0.125"))
+EARLY_STOP_PATIENCE = int(os.environ.get("PRETRAIN_EARLY_STOP_PATIENCE", "8"))
+EARLY_STOP_MIN_DELTA = float(os.environ.get("PRETRAIN_EARLY_STOP_MIN_DELTA", "1e-4"))
 MAX_STEPS = int(os.environ.get("PRETRAIN_STEPS", "6000"))
 CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "1000"))
 EVAL_EVERY = int(os.environ.get("PRETRAIN_EVAL_EVERY", "250"))
@@ -426,9 +430,8 @@ def main():
     train_sampler = DistributedSampler(
         train_ds, num_replicas=WORLD_SIZE, rank=RANK, shuffle=True,
         seed=SEED, drop_last=False) if DISTRIBUTED else None
-    val_sampler = DistributedSampler(
-        val_ds, num_replicas=WORLD_SIZE, rank=RANK, shuffle=False,
-        drop_last=False) if DISTRIBUTED else None
+    val_sampler = ExactDistributedEvalSampler(
+        val_ds, num_replicas=WORLD_SIZE, rank=RANK) if DISTRIBUTED else None
     train_dl = DataLoader(
         train_ds, batch_size=BATCH, shuffle=train_sampler is None,
         sampler=train_sampler, drop_last=False, generator=generator, **loader_kwargs)
@@ -451,6 +454,8 @@ def main():
         patience=PLATEAU_PATIENCE, factor=PLATEAU_FACTOR,
         min_scale=MIN_LR_SCALE,
     )
+    early_stopper = EarlyStopping(
+        patience=EARLY_STOP_PATIENCE, min_delta=EARLY_STOP_MIN_DELTA)
 
     def lr_at(step):
         return warmup_cosine_lr(
@@ -481,6 +486,10 @@ def main():
             # Backward-compatible resume from checkpoints created before
             # the adaptive validation-loss controller was introduced.
             lr_controller.best = best_val
+        if state.get("early_stopper") is not None:
+            early_stopper.load_state_dict(state["early_stopper"])
+        elif math.isfinite(best_val):
+            early_stopper.best = best_val
         if state.get("loader_rng") is not None:
             generator.set_state(state["loader_rng"])
         torch.set_rng_state(state["torch_rng"])
@@ -544,7 +553,8 @@ def main():
     perf_t0 = time.time()
     perf_windows = 0
     epoch = 0
-    while step < MAX_STEPS:
+    stop_training = False
+    while step < MAX_STEPS and not stop_training:
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         for i, batch in enumerate(train_dl):
@@ -557,11 +567,15 @@ def main():
             perf_windows += int(xb.shape[0])
             group_start = (i // ACCUM_STEPS) * ACCUM_STEPS
             group_size = min(ACCUM_STEPS, len(train_dl) - group_start)
-            with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
-                                enabled=DEVICE.type == "cuda"):
-                _, loss = model(xb, xb)
-            scaler.scale(loss / group_size).backward()
             update_now = ((i + 1) % ACCUM_STEPS == 0) or (i + 1 == len(train_dl))
+            # DDP should all-reduce gradients only on the final micro-batch.
+            sync_context = (model.no_sync() if DISTRIBUTED and not update_now
+                            else nullcontext())
+            with sync_context:
+                with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
+                                    enabled=DEVICE.type == "cuda"):
+                    _, loss = model(xb, xb)
+                scaler.scale(loss / group_size).backward()
             if update_now:
                 scaler.unscale_(opt)
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -584,6 +598,7 @@ def main():
                 if step % EVAL_EVERY == 0:
                     vl = evaluate()
                     hist.append(dict(step=step, val_loss=vl, train_loss=loss.item()))
+                    should_stop = early_stopper.observe(vl)
                     old_scale = lr_controller.scale
                     new_scale = lr_controller.observe(vl)
                     log(f"  EVAL step {step}: val_loss={vl:.4f} "
@@ -592,6 +607,9 @@ def main():
                     if new_scale < old_scale:
                         log(f"  validation loss plateaued; LR multiplier "
                             f"{old_scale:.3f} -> {new_scale:.3f}")
+                    if should_stop:
+                        log(f"  early stopping: no meaningful validation improvement for {EARLY_STOP_PATIENCE} evaluations")
+                        stop_training = True
                     if vl < best_val:
                         best_val = vl
                         if IS_MAIN:
@@ -612,6 +630,7 @@ def main():
                             model=unwrap_model(model).state_dict(), optimizer=opt.state_dict(),
                             scaler=scaler.state_dict(), step=step, best_val=best_val,
                             lr_controller=lr_controller.state_dict(),
+                            early_stopper=early_stopper.state_dict(),
                             history=hist, tokenizer_fingerprint=fingerprint,
                             torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
                             loader_rng=generator.get_state(),
@@ -621,6 +640,8 @@ def main():
                         log(f"saved resumable checkpoint at step {step}")
                     sync_workers()
 
+            if stop_training:
+                break
         epoch += 1
 
     if IS_MAIN:
@@ -628,7 +649,7 @@ def main():
         atomic_json(LOG, hist)
         log(f"DONE best_val={best_val:.4f} best_ppl={perplexity_from_loss(best_val):.4f} "
             f"params={n_params/1e6:.2f}M batch={BATCH} accum={ACCUM_STEPS} "
-            f"world_size={WORLD_SIZE}")
+            f"world_size={WORLD_SIZE} early_stopped={stop_training}")
         print("STAGE3 DONE", flush=True)
     sync_workers()
     if DISTRIBUTED:
