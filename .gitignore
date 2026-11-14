@@ -30,6 +30,10 @@ Thumbs.db
 .idea/
 .vscode/
 
+
+# Regenerated model checkpoints and optimizer state
+ckpt/
+
 # Fine-tuning artifacts too heavy for source control (metrics are retained)
 results/finetune/*.pt
 results/finetune/*.npy
