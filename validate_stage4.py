@@ -112,88 +112,78 @@ def main():
         stale_path = os.path.join(OUT, stale)
         if os.path.isfile(stale_path):
             os.remove(stale_path)
-    # ---------------------------------------------------------- validation
-    log(f"validation years {VAL_YEARS}")
+    # Split 2022 chronologically: Jan-Jun fits Platt calibration; Jul-Dec
+    # selects threshold and holding horizon. No observation serves both roles.
     val_ds = s4.FinetuneDS(s4.TARGET_SYM, years=VAL_YEARS,
                            stride=s4.TEST_STRIDE)
-    cache_p, cache_y = f"{OUT}/val_pred.npy", f"{OUT}/val_y.npy"
-    if os.path.exists(cache_p) and os.path.exists(cache_y):
-        pv, yv = np.load(cache_p), np.load(cache_y)
-        if len(pv) == len(val_ds):
-            log(f"reusing cached validation probs (n={len(pv)})")
-        else:
-            pv = yv = None
-    else:
-        pv = yv = None
-    if pv is None:
-        log("running model on validation windows ...")
-        pv, yv = predict(val_ds)
-        np.save(cache_p, pv)
-        np.save(cache_y, yv)
-    bv = np.asarray(val_ds.bars)
-    log(f"validation n={len(pv):,} "
-        f"acc={float(((pv >= .5) == yv).mean()):.4f} "
-        f"brier/ece={brier_ece(pv, yv)} auc={auc_rank(yv, pv):.4f}")
-
-    # ---------------------------------------------------------- calibration
-    from sklearn.linear_model import LogisticRegression
-    eps = 1e-6
-    lv = np.log(np.clip(pv, eps, 1 - eps) / (1 - np.clip(pv, eps, 1 - eps)))
-    platt = LogisticRegression(C=1e6, max_iter=1000).fit(lv.reshape(-1, 1), yv)
-    log(f"Platt: a={platt.coef_[0][0]:.4f} b={platt.intercept_[0]:.4f}")
-
-    def cal(p):
-        e = np.log(np.clip(p, eps, 1 - eps) /
-                   (1 - np.clip(p, eps, 1 - eps)))
-        return platt.predict_proba(e.reshape(-1, 1))[:, 1]
-
-    pvc = cal(pv)
-    log(f"validation calibrated: brier/ece={brier_ece(pvc, yv)}")
-
-    # --------------------------------------------- threshold on validation
+    if len(val_ds) < 200:
+        raise SystemExit("2022 dataset too small for calibration and policy selection")
     lab = np.load(f"{s4.MKT}/lab_{s4.TARGET_SYM}.npz")
     c = lab["c"].astype(np.float64)
-    COST = 0.00015
-    pick = best_threshold(pvc, yv, bv, c, COST)
-    thr = pick[0] if pick else 0.50
-    log(f"threshold chosen on validation @1.5bps/side: {thr} "
-        f"(val net {pick[1]:+.4%}, n={pick[2]})" if pick
-        else "no valid threshold on validation -> using 0.50")
+    bars_all = np.asarray(val_ds.bars, dtype=np.int64)
+    split_ts = np.datetime64("2022-07-01T00:00:00", "s").astype(np.int64)
+    sample_ts = np.asarray(lab["ts"], dtype=np.int64)[bars_all]
+    cal_mask = sample_ts < split_ts
+    policy_mask = ~cal_mask
+    if cal_mask.sum() < 100 or policy_mask.sum() < 100:
+        raise SystemExit("insufficient samples in one 2022 half; reduce ST4_TEST_STRIDE")
+    log(f"2022 calibration samples={int(cal_mask.sum())}, policy samples={int(policy_mask.sum())}")
+    p_all, y_all = predict(val_ds)
+    if len(p_all) != len(bars_all):
+        raise SystemExit("2022 prediction/window mismatch")
+    np.save(f"{OUT}/val_pred.npy", p_all)
+    np.save(f"{OUT}/val_y.npy", y_all)
+    p_cal, y_cal = p_all[cal_mask], y_all[cal_mask]
+    p_policy, y_policy = p_all[policy_mask], y_all[policy_mask]
+    b_policy = bars_all[policy_mask]
+    if len(np.unique(y_cal)) != 2 or len(np.unique(y_policy)) != 2:
+        raise SystemExit("both target classes are required in each 2022 half")
 
-    # --- pick the holding horizon on VALIDATION too (never on the test set)
-    sigv = np.where(pvc >= thr, 1, np.where(pvc <= 1 - thr, -1, 0))
-    mv = sigv != 0
-    val_horizons = []
+    # Probability calibration is fit only on Jan-Jun 2022.
+    from sklearn.linear_model import LogisticRegression
+    eps = 1e-6
+    lcal = np.log(np.clip(p_cal, eps, 1 - eps) /
+                  (1 - np.clip(p_cal, eps, 1 - eps)))
+    platt = LogisticRegression(C=1e6, max_iter=1000).fit(
+        lcal.reshape(-1, 1), y_cal)
+
+    def cal(p):
+        logits = np.log(np.clip(p, eps, 1 - eps) /
+                        (1 - np.clip(p, eps, 1 - eps)))
+        return platt.predict_proba(logits.reshape(-1, 1))[:, 1]
+
+    pcc, ppc = cal(p_cal), cal(p_policy)
+    log(f"Platt calibration Jan-Jun: a={platt.coef_[0][0]:.4f}, b={platt.intercept_[0]:.4f}")
+    log(f"calibration Brier/ECE raw={brier_ece(p_cal, y_cal)} calibrated={brier_ece(pcc, y_cal)}")
+    log(f"policy Brier/ECE raw={brier_ece(p_policy, y_policy)} calibrated={brier_ece(ppc, y_policy)}")
+
+    # Threshold and holding horizon are selected only on Jul-Dec 2022.
+    COST = COSTS_SIDE[1]
+    pick = best_threshold(ppc, y_policy, b_policy, c, COST)
+    if pick is None:
+        raise SystemExit("no valid threshold on 2022 policy period; 2023 final test was NOT accessed")
+    thr = pick[0]
+    sigp = np.where(ppc >= thr, 1, np.where(ppc <= 1 - thr, -1, 0))
+    policy_horizons = []
     for k in HORIZONS:
-        eligible = mv & (bv + k < len(c))
-        if eligible.sum() < 10:
+        eligible = (sigp != 0) & (b_policy + k < len(c))
+        if eligible.sum() < MIN_BETS:
             continue
-        sims = {co: simulate_non_overlapping(
-            c, bv[eligible], sigv[eligible], k, co) for co in COSTS_SIDE}
-        reference = sims[COSTS_SIDE[1]]
-        if reference["trade_count"] < 10:
+        sims = {co: simulate_non_overlapping(c, b_policy[eligible], sigp[eligible], k, co)
+                for co in COSTS_SIDE}
+        ref = sims[COSTS_SIDE[1]]
+        if ref["trade_count"] < MIN_BETS:
             continue
-        val_horizons.append(dict(
-            horizon=k, n=reference["trade_count"],
-            gross_total=reference["gross_compounded"],
-            nets={f"{co}": sims[co]["net_compounded"] for co in COSTS_SIDE}))
-    k_best = None
-    if val_horizons:
-        best = max(val_horizons,
-                   key=lambda h: h["nets"][f"{COSTS_SIDE[1]}"])
-        k_best = int(best["horizon"])
-        log(f"horizon dipilih di validation @1.5bps/side: k={k_best} bar "
-            f"(val gross {best['gross_total']*100:+.2f}%, "
-            f"net {best['nets'][f'{COSTS_SIDE[1]}']*100:+.2f}%)")
-        print("--- horizon di VALIDATION (untuk pemilihan, bukan hasil test) ---")
-        print(f"  {'k bars':>7} {'n':>5} {'gross':>9} "
-              + " ".join(f"net@{co*1e4:4.1f}bps".rjust(11)
-                         for co in COSTS_SIDE))
-        for h in val_horizons:
-            cells = [f"{h['nets'][f'{co}']*100:+10.2f}%" for co in COSTS_SIDE]
-            mark = "  <== dipilih" if h["horizon"] == k_best else ""
-            print(f"  {h['horizon']:7d} {h['n']:5d} "
-                  f"{h['gross_total']*100:+8.2f}% " + " ".join(cells) + mark)
+        policy_horizons.append(dict(
+            horizon=k, trades=ref["trade_count"],
+            gross=ref["gross_compounded"],
+            net={str(co): sims[co]["net_compounded"] for co in COSTS_SIDE}))
+    if not policy_horizons:
+        raise SystemExit("no valid holding horizon on 2022 policy period; 2023 final test was NOT accessed")
+    chosen = max(policy_horizons, key=lambda h: h["net"][str(COSTS_SIDE[1])])
+    k_best = int(chosen["horizon"])
+    log(f"locked 2022 policy: threshold={thr:.3f}, horizon={k_best}, "
+        f"trades={chosen['trades']}, net={chosen['net'][str(COSTS_SIDE[1])]:+.3%}")
 
     # ------------------------------------------------------------ locked final test
     # Do not instantiate or infer on 2023 until calibration, threshold and
@@ -209,14 +199,14 @@ def main():
     np.save(f"{OUT}/test_y.npy", y)
 
     res = dict(
-        val_years=list(VAL_YEARS), val_n=int(len(pv)),
-        val=dict(acc=float(((pv >= .5) == yv).mean()),
-                 brier_ece=list(brier_ece(pv, yv)), auc=auc_rank(yv, pv)),
-        val_calibrated=dict(brier_ece=list(brier_ece(pvc, yv))),
+        calibration_period="2022-01-01/2022-06-30",
+        policy_selection_period="2022-07-01/2022-12-31",
+        calibration=dict(n=int(len(p_cal)), brier_ece_raw=list(brier_ece(p_cal, y_cal)),
+                         brier_ece_calibrated=list(brier_ece(pcc, y_cal))),
+        policy_selection=dict(n=int(len(p_policy)), brier_ece=list(brier_ece(ppc, y_policy))),
         platt=dict(a=float(platt.coef_[0][0]), b=float(platt.intercept_[0])),
-        threshold=float(thr),
-        chosen_horizon=k_best,
-        val_horizons=val_horizons,
+        threshold=float(thr), chosen_horizon=k_best,
+        policy_horizons=policy_horizons,
         test=dict(acc=float(((pred >= .5) == y).mean()),
                   brier_ece=list(brier_ece(pred, y)),
                   auc=auc_rank(y, pred),
