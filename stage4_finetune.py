@@ -22,7 +22,7 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler
 
 import stage3_pretrain as s3
 
@@ -46,7 +46,7 @@ EPOCHS = _env("ST4_EPOCHS", 3, int)
 LR = _env("ST4_LR", 1e-4, float)
 BATCH = _env("ST4_BATCH", 64, int)
 ACCUM_STEPS = max(1, _env("ST4_ACCUM", 4, int))
-STRIDE = _env("ST4_STRIDE", 4, int)
+STRIDE = _env("ST4_STRIDE", 32, int)  # balanced multi-asset training windows
 VAL_STRIDE = _env("ST4_VAL_STRIDE", 4, int)
 TEST_STRIDE = _env("ST4_TEST_STRIDE", 4, int)
 HELD_STRIDE = _env("ST4_HELD_STRIDE", 8, int)
@@ -337,21 +337,47 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     log(f"finetune model params: {n_params/1e6:.2f}M on {DEVICE}; batch={BATCH} x accum={ACCUM_STEPS}; AMP={USE_AMP}")
 
-    # The final 2023 test dataset is deliberately not constructed until the
-    # checkpoint has been selected using 2021 validation data only.
-    train_ds = FinetuneDS(TARGET_SYM, years=range(2015, 2021), stride=STRIDE)
+    # Train the shared heads across all non-held-out assets, with equal sampling
+    # probability per asset. Select the checkpoint on XAUUSD 2021 only; 2022 is
+    # reserved for calibration and 2023 is not constructed until final testing.
+    train_parts = []
+    train_windows_by_symbol = {}
+    train_symbols = [sym for sym in s3.SYMBOLS if sym not in s3.HELD_OUT]
+    for sym in train_symbols:
+        try:
+            part = FinetuneDS(sym, years=range(2015, 2021), stride=STRIDE)
+        except FileNotFoundError:
+            log(f"skip training symbol {sym}: missing M5 token/label artifacts")
+            continue
+        if len(part):
+            train_parts.append(part)
+            train_windows_by_symbol[sym] = len(part)
+    if not train_parts:
+        raise SystemExit("no non-held-out multi-asset training data found")
+    train_ds = ConcatDataset(train_parts)
     val_ds = FinetuneDS(TARGET_SYM, years=[2021], stride=VAL_STRIDE)
-    if not len(train_ds) or not len(val_ds):
-        raise SystemExit(
-            f"empty dataset: train={len(train_ds)} val={len(val_ds)}"
-        )
+    if not len(val_ds):
+        raise SystemExit("empty XAUUSD 2021 validation dataset")
+
+    # Each asset contributes approximately the same number of sampled windows,
+    # preventing the largest datasets from dominating the shared prediction heads.
+    sample_weights = torch.cat([
+        torch.full((len(part),), 1.0 / len(part), dtype=torch.double)
+        for part in train_parts
+    ])
+    sampler = WeightedRandomSampler(
+        sample_weights, num_samples=len(sample_weights), replacement=True,
+        generator=torch.Generator().manual_seed(SEED)
+    )
     loader_args = dict(num_workers=NUM_WORKERS,
                        pin_memory=DEVICE.type == "cuda")
     if NUM_WORKERS > 0:
         loader_args["persistent_workers"] = True
-    tr_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
+    tr_dl = DataLoader(train_ds, batch_size=BATCH, sampler=sampler,
                        drop_last=False, **loader_args)
     va_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False, **loader_args)
+    log(f"balanced multi-asset fine-tuning: {len(train_parts)} symbols, "
+        f"{len(train_ds):,} windows; train stride={STRIDE}")
 
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                             lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
@@ -444,6 +470,9 @@ def main():
                    config=dict(epochs=EPOCHS, batch=BATCH, accumulation=ACCUM_STEPS,
                                learning_rate=LR, train_stride=STRIDE,
                                validation_stride=VAL_STRIDE, test_stride=TEST_STRIDE,
+                               train_symbols=list(train_windows_by_symbol),
+                               train_windows_by_symbol=train_windows_by_symbol,
+                               sampling="equal_probability_per_asset",
                                amp=USE_AMP, device=str(DEVICE))),
               open(f"{OUT}/metrics.json", "w"), indent=1)
     np.save(f"{OUT}/test_pred.npy", te["pred"])
