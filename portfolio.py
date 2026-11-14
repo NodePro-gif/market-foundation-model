@@ -15,8 +15,12 @@ def simulate_non_overlapping(close, bars, signals, horizon, cost_per_side=0.0001
     signals = np.asarray(signals, dtype=np.int8)
     if bars.ndim != 1 or signals.ndim != 1 or len(bars) != len(signals):
         raise ValueError("bars and signals must be 1-D arrays with equal lengths")
-    if horizon < 1 or cost_per_side < 0:
-        raise ValueError("horizon must be positive and cost non-negative")
+    if horizon < 1 or cost_per_side < 0 or cost_per_side >= 1:
+        raise ValueError("horizon must be positive and cost_per_side must be in [0, 1)")
+    if not np.isfinite(close).all() or (close <= 0).any():
+        raise ValueError("close prices must be finite and strictly positive")
+    if not np.isin(signals, (-1, 0, 1)).all():
+        raise ValueError("signals must contain only -1, 0, or 1")
     if len(bars) and (np.diff(bars) <= 0).any():
         raise ValueError("bars must be strictly increasing")
     if len(bars) and (bars.min() < 0 or bars.max() + horizon >= len(close)):
