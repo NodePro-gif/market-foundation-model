@@ -148,10 +148,7 @@ def _tok_cache(key):
     # Accessing NpzFile["tokens"] for every sample repeatedly decompresses it.
     if key not in _tok_mem:
         with np.load(f"{MKT}/tok_{key[0]}_{key[1]}.npz") as archive:
-            _tok_mem[key] = {
-                "tokens": archive["tokens"],
-                "spans": archive["spans"],
-            }
+            _tok_mem[key] = archive["tokens"]
     return _tok_mem[key]
 
 
@@ -241,7 +238,7 @@ class MarketLMSmart(Dataset):
 
     def __getitem__(self, i):
         sym, tf, off, reg, sess = self.items[i]
-        t = _tok_cache((sym, tf))["tokens"][off: off + CTX - 5]
+        t = _tok_cache((sym, tf))[off: off + CTX - 5]
         ids = np.empty(len(t) + 5, dtype=np.int64)
         ids[0] = BOS
         ids[1] = SYM0 + SYM_ID[sym]
