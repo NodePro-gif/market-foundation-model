@@ -4,8 +4,8 @@
 Fixes three problems at once:
 
 1. Calibration      - fit Platt scaling on the reserved 2022 period (not on the test set),
-                      report test ECE before/after.
-2. Threshold choice - pick the betting threshold on 2021-2022, lock it,
+                      report final-test ECE before/after.
+2. Threshold choice - pick the betting threshold on the reserved 2022 period, lock it,
                       then touch 2023 exactly once (no post-hoc selection).
 3. Profitability    - the round-trip cost is paid once per position, so
                       holding k bars amortises it. Sweep the holding horizon
