@@ -2,6 +2,21 @@
 
 > **Status protokol (diperbarui 2026-11-14):** catatan eksperimen di bawah ini adalah rekam historis, bukan hasil evaluasi dari pipeline yang sekarang. Kode telah diperketat ke split kronologis: tokenizer/pretraining/fine-tuning dilatih pada 2015–2020; checkpoint pretraining dan supervised dipilih pada 2021; kalibrasi/threshold dipilih pada 2022; 2023 menjadi final test yang tidak disentuh. Statistik tokenizer/BPE hanya di-fit pada aset non-held-out 2015–2020. Karena checkpoint dan angka historis dibuat dengan protokol lama, seluruh artefak harus dibuat ulang sebelum angka performa baru dilaporkan. Jangan mengutip angka backtest lama sebagai bukti performa out-of-sample pada protokol baru.
 
+## 2026-11-14 — hardening pipeline dan Google Colab T4
+
+- Menghapus pasangan BPE sintetis antar-aset/timeframe dengan sentinel batas; sampel BPE sekarang berupa potongan candle berurutan yang tersebar sepanjang 2015–2020.
+- Mengikat checkpoint pretraining ke SHA-256 vocab.json + bpe.npz melalui best_manifest.json; fine-tuning menolak checkpoint lama/tidak cocok.
+- Memindahkan pemeriksaan checkpoint ke validasi 2021; tidak lagi membaca final test 2023.
+- Pretraining memakai SDPA, FP16 AMP, gradient accumulation, evaluasi seluruh validation split, dan checkpoint resumable.
+- Fine-tuning memakai AMP, gradient accumulation, sampling seimbang lintas aset non-held-out; checkpoint dipilih pada XAUUSD 2021.
+- Kalibrasi/threshold/horizon dipilih pada 2022; backtest hanya menjalankan kebijakan terkunci pada 2023 dan tidak melakukan sweep parameter pada test.
+- Menambahkan notebook Colab T4 dengan Google Drive persistence serta pemeriksaan CI untuk JSON notebook.
+
+**Belum dilakukan:** training ulang end-to-end di runtime GPU T4. CI memeriksa sintaks, tokenizer self-test, notebook JSON, dan konsistensi dependensi; CI bukan bukti bahwa training GPU atau kualitas prediksi sudah berhasil.
+
+
+> **Status protokol (diperbarui 2026-11-14):** catatan eksperimen di bawah ini adalah rekam historis, bukan hasil evaluasi dari pipeline yang sekarang. Kode telah diperketat ke split kronologis: tokenizer/pretraining/fine-tuning dilatih pada 2015–2020; checkpoint pretraining dan supervised dipilih pada 2021; kalibrasi/threshold dipilih pada 2022; 2023 menjadi final test yang tidak disentuh. Statistik tokenizer/BPE hanya di-fit pada aset non-held-out 2015–2020. Karena checkpoint dan angka historis dibuat dengan protokol lama, seluruh artefak harus dibuat ulang sebelum angka performa baru dilaporkan. Jangan mengutip angka backtest lama sebagai bukti performa out-of-sample pada protokol baru.
+
 
 Catatan "sedang ngapain" untuk tiap tahap. Untuk status **real-time** jalankan:
 
