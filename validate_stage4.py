@@ -125,9 +125,13 @@ def main():
     lab = np.load(f"{s4.MKT}/lab_{s4.TARGET_SYM}.npz")
     c = lab["c"].astype(np.float64)
     bars_all = np.asarray(val_ds.bars, dtype=np.int64)
-    sample_ts = np.asarray(lab["ts"], dtype=np.int64)[bars_all]
+    all_ts = np.asarray(lab["ts"], dtype=np.int64)
+    sample_ts = all_ts[bars_all]
     cal_mask, policy_mask = [np.asarray(mask, dtype=bool)
                              for mask in split_2022_periods(sample_ts)]
+    # Purge calibration labels whose longest 288-bar target reaches July.
+    july_bar = int(np.searchsorted(all_ts, 1656633600, side="left"))
+    cal_mask &= (bars_all + 288) < july_bar
     if cal_mask.sum() < 100 or policy_mask.sum() < 100:
         raise SystemExit("insufficient samples in one 2022 half; reduce ST4_TEST_STRIDE")
     log(f"2022 calibration samples={int(cal_mask.sum())}, policy samples={int(policy_mask.sum())}")
