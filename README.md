@@ -1,6 +1,7 @@
 # Market Foundation Model
 
 [![CI](https://github.com/NodePro-gif/market-foundation-model/actions/workflows/ci.yml/badge.svg)](https://github.com/NodePro-gif/market-foundation-model/actions/workflows/ci.yml)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NodePro-gif/market-foundation-model/blob/main/notebooks/Market_Foundation_Model_T4.ipynb)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 
@@ -44,6 +45,7 @@ The existing training entry points remain at the repository root to preserve the
 ```text
 .
 ├── .github/workflows/       # Continuous integration
+├── notebooks/               # Google Colab T4 training notebook
 ├── docs/                    # Project and reproducibility documentation
 ├── ckpt/                    # Pretrained checkpoint and training log
 ├── results/                 # Tracked experiment metrics and figures
@@ -65,6 +67,8 @@ The existing training entry points remain at the repository root to preserve the
 See [Project structure](docs/PROJECT_STRUCTURE.md) for the role of supporting scripts and generated artifacts.
 
 ## Quick start
+
+For a guided end-to-end run on a **Google Colab T4 GPU**, open [the Colab training notebook](notebooks/Market_Foundation_Model_T4.ipynb). It mounts Google Drive for persistent datasets/checkpoints, downloads the corpus, builds the tokenizer, pretrains, verifies the checkpoint, fine-tunes, calibrates and evaluates the validation-locked policy.
 
 ### 1. Environment
 
@@ -131,6 +135,8 @@ python -u stage4_finetune.py
 ```
 
 **Current research protocol:** fit tokenizer statistics and BPE on non-held-out assets from 2015–2020; pretrain on 2015–2020 and select the pretraining checkpoint on 2021; fine-tune on 2015–2020 and select the supervised checkpoint on 2021; calibrate on 2022; reserve 2023 as the final test. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; committed checkpoints and historical metrics predate the corrected protocol.
+
+For pretraining on Colab T4, the notebook defaults to micro-batch 32 with 2 gradient-accumulation steps (effective batch 64), FP16 AMP and periodic resumable checkpoints. Fine-tuning defaults to micro-batch 64 with 4 accumulation steps (effective batch 256). These are starting configurations, not guaranteed optimal settings for every runtime. Tune them only using training/validation behavior, never the final test set.
 
 For a full reproduction, follow [Reproducibility and data protocol](docs/REPRODUCIBILITY.md) and the experiment notes in [PROGRESS.md](PROGRESS.md). Do not compare runs unless their data split, stride, seed, model checkpoint and cost assumptions match.
 
