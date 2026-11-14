@@ -96,6 +96,22 @@ if int(long_spans.sum()) != 512 or int(long_spans.max()) != 512:
 else:
     print(f"  OK long-span: dtype={long_spans.dtype}, max={int(long_spans.max())}")
 
+print("== BPE sequence-boundary regression ==")
+orig = st.N_MERGES
+st.N_MERGES = 8
+try:
+    # Each segment is a one-symbol sequence. Without sentinels, concatenation
+    # would fabricate the frequent pair (1, 2) across unrelated series.
+    separated = np.array([1, -1, 2, -1, 1, -1, 2, -1], dtype=np.int64)
+    boundary_merges, _ = st.train_bpe(separated)
+finally:
+    st.N_MERGES = orig
+if len(boundary_merges) != 0:
+    fails += 1
+    print(f"  FAIL boundary isolation: learned {boundary_merges.tolist()}")
+else:
+    print("  OK boundary isolation: no cross-series pair learned")
+
 print("== BPE training sanity (toy corpus) ==")
 # train_bpe uses the global N_MERGES; patch it for the toy run
 orig = st.N_MERGES
