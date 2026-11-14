@@ -447,7 +447,7 @@ def main():
     # Remove cached predictions/calibration from earlier checkpoints so that
     # validation can never silently reuse stale model outputs.
     for stale in ("val_pred.npy", "val_y.npy", "val_pred_cal.npy",
-                  "test_pred_cal.npy", "validation.json", "backtest.json"):
+                  "validation.json", "backtest.json"):
         stale_path = os.path.join(OUT, stale)
         if os.path.isfile(stale_path):
             os.remove(stale_path)
