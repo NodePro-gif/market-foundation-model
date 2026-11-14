@@ -57,6 +57,13 @@ def auc_rank(y, s):
     return s4.auc_rank(y, s)
 
 
+def split_2022_periods(sample_timestamps):
+    """Return disjoint Jan-Jun calibration and Jul-Dec policy masks."""
+    cutoff = np.datetime64("2022-07-01T00:00:00", "s").astype(np.int64)
+    timestamps = np.asarray(sample_timestamps, dtype=np.int64)
+    return timestamps < cutoff, timestamps >= cutoff
+
+
 def predict(ds):
     """Run the fine-tuned heads on the configured device."""
     ckpt = os.path.join(s4.OUT, "best.pt")
@@ -121,10 +128,8 @@ def main():
     lab = np.load(f"{s4.MKT}/lab_{s4.TARGET_SYM}.npz")
     c = lab["c"].astype(np.float64)
     bars_all = np.asarray(val_ds.bars, dtype=np.int64)
-    split_ts = np.datetime64("2022-07-01T00:00:00", "s").astype(np.int64)
     sample_ts = np.asarray(lab["ts"], dtype=np.int64)[bars_all]
-    cal_mask = sample_ts < split_ts
-    policy_mask = ~cal_mask
+    cal_mask, policy_mask = split_2022_periods(sample_ts)
     if cal_mask.sum() < 100 or policy_mask.sum() < 100:
         raise SystemExit("insufficient samples in one 2022 half; reduce ST4_TEST_STRIDE")
     log(f"2022 calibration samples={int(cal_mask.sum())}, policy samples={int(policy_mask.sum())}")
