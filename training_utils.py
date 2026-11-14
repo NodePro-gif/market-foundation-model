@@ -2,6 +2,64 @@
 
 import math
 
+from torch.utils.data import Sampler
+
+
+class ExactDistributedEvalSampler(Sampler):
+    """Shard evaluation indices across ranks without padding or duplication."""
+
+    def __init__(self, dataset, num_replicas, rank):
+        if int(num_replicas) < 1:
+            raise ValueError("num_replicas must be positive")
+        if int(rank) < 0 or int(rank) >= int(num_replicas):
+            raise ValueError("rank must be in [0, num_replicas)")
+        self.dataset = dataset
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+
+    def __iter__(self):
+        return iter(range(self.rank, len(self.dataset), self.num_replicas))
+
+    def __len__(self):
+        return max(0, (len(self.dataset) - self.rank + self.num_replicas - 1)
+                   // self.num_replicas)
+
+
+class EarlyStopping:
+    """Stop after validation fails to improve by min_delta for patience checks."""
+
+    def __init__(self, patience=8, min_delta=1e-4):
+        if int(patience) < 1:
+            raise ValueError("patience must be at least one")
+        if min_delta < 0 or not math.isfinite(float(min_delta)):
+            raise ValueError("min_delta must be finite and non-negative")
+        self.patience = int(patience)
+        self.min_delta = float(min_delta)
+        self.best = float("inf")
+        self.bad_evals = 0
+
+    def observe(self, metric):
+        metric = float(metric)
+        if math.isfinite(metric) and metric < self.best - self.min_delta:
+            self.best = metric
+            self.bad_evals = 0
+            return False
+        self.bad_evals += 1
+        return self.bad_evals >= self.patience
+
+    def state_dict(self):
+        return {"patience": self.patience, "min_delta": self.min_delta,
+                "best": self.best, "bad_evals": self.bad_evals}
+
+    def load_state_dict(self, state):
+        if int(state["patience"]) != self.patience or float(state["min_delta"]) != self.min_delta:
+            raise ValueError("early stopping configuration mismatch")
+        self.best = float(state["best"])
+        self.bad_evals = int(state["bad_evals"])
+        if self.bad_evals < 0:
+            raise ValueError("invalid early stopping state")
+
+
 
 def warmup_cosine_lr(step, base_lr, warmup, total_steps, min_ratio=0.1):
     """Linear warmup followed by cosine decay, returning an absolute LR."""
