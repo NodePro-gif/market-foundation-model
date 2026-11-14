@@ -29,9 +29,12 @@ import stage3_pretrain as s3
 IS_COLAB = os.path.isdir("/content")
 MKT = s3.MKT
 # local runs write into the repo so results travel with the code
-OUT = ("/content/ftune" if IS_COLAB
-       else os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "results", "finetune"))
+OUT = os.environ.get(
+    "MFM_FT_DIR",
+    "/content/ftune" if IS_COLAB
+    else os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "results", "finetune"),
+)
 os.makedirs(OUT, exist_ok=True)
 
 
