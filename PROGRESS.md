@@ -2,6 +2,18 @@
 
 ## 2026-11-14 — T4 throughput optimization
 
+- Enable optional `torch.compile(mode="reduce-overhead")` for both training stages on CUDA; notebook opts in, eager mode remains available via `MFM_TORCH_COMPILE=0`.
+- Log pretraining windows/second and peak allocated VRAM every 50 optimizer updates; reduce full 2021 validation frequency to every 1000 steps to reduce pauses.
+- Reuse Stage-3's decompressed memory-mapped token arrays in Stage-4 dataset construction and DataLoader workers to reduce repeated NPZ decompression and RAM duplication.
+- Increase Colab Stage-4 DataLoader workers to 4 while preserving micro/effective batch sizes, AMP, pinned memory, prefetching, and chronological splits.
+- Make Drive checkpoint mirroring asynchronous and restrict it to files inside the Stage-3 checkpoint directory. This prevents Stage-4 `best.pt` from overwriting the pretrained `best.pt`.
+- Actual T4 throughput and VRAM must be measured in Colab; CI cannot establish runtime speedup or prove model quality.
+
+---
+
+
+## 2026-11-14 — T4 throughput optimization
+
 - Pretraining default micro-batch increased from 32 to 64; accumulation changed from 2 to 1, preserving effective batch 64.
 - Fine-tuning default micro-batch increased from 32 to 64; accumulation changed from 8 to 4, preserving effective batch 256.
 - Enabled fused AdamW where supported, CUDA matmul precision tuning, pinned-memory batches, non-blocking host-to-device transfers, persistent workers and configurable prefetching.
