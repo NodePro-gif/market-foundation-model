@@ -47,13 +47,14 @@ def _env(name, default, cast):
 # and on a small CPU box (ST4_EPOCHS=1 ST4_BATCH=32 ST4_STRIDE=64 ...)
 EPOCHS = _env("ST4_EPOCHS", 3, int)
 LR = _env("ST4_LR", 1e-4, float)
-BATCH = _env("ST4_BATCH", 32, int)
-ACCUM_STEPS = max(1, _env("ST4_ACCUM", 8, int))
+BATCH = _env("ST4_BATCH", 64, int)
+ACCUM_STEPS = max(1, _env("ST4_ACCUM", 4, int))
 STRIDE = _env("ST4_STRIDE", 32, int)  # balanced multi-asset training windows
 VAL_STRIDE = _env("ST4_VAL_STRIDE", 4, int)
 TEST_STRIDE = _env("ST4_TEST_STRIDE", 4, int)
 HELD_STRIDE = _env("ST4_HELD_STRIDE", 8, int)
-NUM_WORKERS = _env("ST4_WORKERS", 0, int)
+NUM_WORKERS = _env("ST4_WORKERS", 2, int)
+PREFETCH_FACTOR = max(2, _env("ST4_PREFETCH", 4, int))
 USE_AMP = _env("ST4_AMP", 1, int) == 1
 WARMUP_RATIO = _env("ST4_WARMUP_RATIO", 0.08, float)
 MIN_LR_RATIO = _env("ST4_MIN_LR_RATIO", 0.10, float)
@@ -69,6 +70,8 @@ SCALER = torch.cuda.amp.GradScaler(enabled=DEVICE.type == "cuda" and USE_AMP)
 if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+torch.set_num_threads(max(1, _env("MFM_CPU_THREADS", 4, int)))
 t0 = time.time()
 
 
@@ -285,11 +288,11 @@ def run_epoch(model, dl, opt=None, tag="", scheduler=None):
     if training:
         opt.zero_grad(set_to_none=True)
     for i, (xb, yd, yv, yq, vq) in enumerate(dl):
-        xb = xb.to(DEVICE)
-        yd = yd.to(DEVICE).float()
-        yv = yv.to(DEVICE)
-        yq = yq.to(DEVICE)
-        vq = vq.to(DEVICE)
+        xb = xb.to(DEVICE, non_blocking=True)
+        yd = yd.to(DEVICE, non_blocking=True).float()
+        yv = yv.to(DEVICE, non_blocking=True)
+        yq = yq.to(DEVICE, non_blocking=True)
+        vq = vq.to(DEVICE, non_blocking=True)
         with torch.set_grad_enabled(training):
             with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
                                 enabled=DEVICE.type == "cuda" and USE_AMP):
@@ -358,7 +361,11 @@ def main():
     base = load_base(ckpt)
     model = FinetuneGPT(base).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
-    log(f"finetune model params: {n_params/1e6:.2f}M on {DEVICE}; batch={BATCH} x accum={ACCUM_STEPS}; AMP={USE_AMP}")
+    log(f"finetune model params: {n_params/1e6:.2f}M on {DEVICE}; "
+        f"batch={BATCH} x accum={ACCUM_STEPS}; AMP={USE_AMP}; workers={NUM_WORKERS}")
+    if DEVICE.type == "cuda":
+        props = torch.cuda.get_device_properties(DEVICE)
+        log(f"GPU={props.name} VRAM={props.total_memory / 1024**3:.1f}GiB")
 
     # Train the shared heads across all non-held-out assets, with equal sampling
     # probability per asset. Select the checkpoint on XAUUSD 2021 only; 2022 is
@@ -396,14 +403,20 @@ def main():
                        pin_memory=DEVICE.type == "cuda")
     if NUM_WORKERS > 0:
         loader_args["persistent_workers"] = True
+        loader_args["prefetch_factor"] = PREFETCH_FACTOR
     tr_dl = DataLoader(train_ds, batch_size=BATCH, sampler=sampler,
                        drop_last=False, **loader_args)
     va_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False, **loader_args)
     log(f"balanced multi-asset fine-tuning: {len(train_parts)} symbols, "
         f"{len(train_ds):,} windows; train stride={STRIDE}")
 
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
-                            lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
+    try:
+        opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                                lr=LR, betas=(0.9, 0.95), weight_decay=0.01,
+                                fused=DEVICE.type == "cuda")
+    except TypeError:
+        opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                                lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
     updates_per_epoch = math.ceil(len(tr_dl) / ACCUM_STEPS)
     total_updates = max(1, EPOCHS * updates_per_epoch)
     warmup_updates = min(total_updates - 1, max(1, int(total_updates * WARMUP_RATIO)))
