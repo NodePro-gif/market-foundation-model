@@ -1,3 +1,11 @@
+# 2026-11-14 — Adaptive pretraining convergence
+
+- Added a tested warmup/cosine learning-rate helper and validation-loss plateau controller for Stage 3. If validation loss fails to improve for two evaluations, the LR multiplier halves down to 0.125; controller state is stored in resume checkpoints.
+- Reduced default warm-up from 300 to 150 optimizer updates (2.5% of the 6,000-step T4 schedule) to reach the peak learning rate sooner while retaining the same peak LR and cosine decay.
+- Stage-3 training logs now report PPL with a safe numerical cap and final best validation PPL. Perplexity has a mathematical floor of 1 (`exp(cross_entropy)`), not 0; zero loss/PPL 1 means perfect held-out next-token prediction and is not a realistic market-data target.
+- Added unit tests for plateau patience, improvement resets, checkpoint state restoration, LR schedule bounds and PPL mathematics.
+- No measured convergence improvement is claimed until a new T4 training run is completed; compare validation loss/PPL and keep 2023 untouched.
+
 # 2026-11-14 — T4 throughput tuning
 
 - Reused Stage-3 `.npy` memory-mapped token cache inside Stage-4 datasets and DataLoader workers, avoiding repeated full-token NPZ decompression and per-worker int64 copies.
