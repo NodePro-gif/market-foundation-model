@@ -67,6 +67,7 @@ class FinetuneDS(Dataset):
     """Windows ending at each labeled M5 bar (stride small for dense labels)."""
 
     def __init__(self, sym, years, stride=8):
+        self.sym = sym
         lab = np.load(f"{MKT}/lab_{sym}.npz")
         z = np.load(f"{MKT}/tok_{sym}_M5.npz")
         tok = z["tokens"].astype(np.int64)
@@ -106,13 +107,13 @@ class FinetuneDS(Dataset):
 
     def __getitem__(self, i):
         st, en = int(self.starts[i]), int(self.ends[i])
-        tok = _tokens(TARGET_SYM)
+        tok = _tokens(self.sym)
         b = int(self.bars[i])
         reg = int(self.lab["regime"][b])
         sess = int(self.lab["sess"][b])
         ids = np.empty(s3.CTX, dtype=np.int64)
         ids[0] = s3.BOS
-        ids[1] = s3.SYM0 + s3.SYM_ID[TARGET_SYM]
+        ids[1] = s3.SYM0 + s3.SYM_ID[self.sym]
         ids[2] = s3.TF0 + s3.TF_ID["M5"]
         ids[3] = s3.REG0 + reg
         ids[4] = s3.SESS0 + sess
@@ -300,24 +301,39 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     log(f"finetune model params: {n_params/1e6:.2f}M")
 
-    train_ds = FinetuneDS(TARGET_SYM, years=range(2015, 2023), stride=STRIDE)
+    # Keep 2023 completely out of checkpoint selection and training feedback.
+    # The validation period selects the checkpoint; the test period is read once
+    # after training has finished.
+    train_ds = FinetuneDS(TARGET_SYM, years=range(2015, 2021), stride=STRIDE)
+    val_ds = FinetuneDS(TARGET_SYM, years=range(2021, 2023), stride=TEST_STRIDE)
     test_ds = FinetuneDS(TARGET_SYM, years=[2023], stride=TEST_STRIDE)
+    if not len(train_ds) or not len(val_ds) or not len(test_ds):
+        raise SystemExit(
+            f"empty dataset: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}"
+        )
     tr_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True, drop_last=True)
+    va_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False)
     te_dl = DataLoader(test_ds, batch_size=BATCH, shuffle=False)
 
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                             lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
-    best = -1.0
+    best_val_auc = -float("inf")
     for ep in range(1, EPOCHS + 1):
         r = run_epoch(model, tr_dl, opt, tag=f"ep{ep} TRAIN")
+        va = run_epoch(model, va_dl, None, tag=f"ep{ep} VALID")
         log(f"ep{ep} TRAIN loss_dir={r['loss_dir']:.4f} "
             f"loss_vol={r['loss_vol']:.4f} loss_q={r['loss_q']:.4f} "
             f"acc={r['acc']:.4f} auc={r['auc']:.4f}")
-        if r["auc"] > best:
-            best = r["auc"]
+        log(f"ep{ep} VALID acc={va['acc']:.4f} auc={va['auc']:.4f} "
+            f"brier={va['brier']:.4f} ece={va['ece']:.4f}")
+        if np.isfinite(va["auc"]) and va["auc"] > best_val_auc:
+            best_val_auc = va["auc"]
             torch.save(model.state_dict(), f"{OUT}/best.pt")
 
-    model.load_state_dict(torch.load(f"{OUT}/best.pt", weights_only=True))
+    if not os.path.exists(f"{OUT}/best.pt"):
+        raise SystemExit("no valid checkpoint was selected; validation AUC is undefined")
+    model.load_state_dict(torch.load(f"{OUT}/best.pt", map_location="cpu",
+                                     weights_only=True))
     te = run_epoch(model, te_dl, None)
     log(f"TEST XAUUSD 2023: acc={te['acc']:.4f} auc={te['auc']:.4f} "
         f"brier={te['brier']:.4f} ece={te['ece']:.4f} n={len(te['y']):,}")

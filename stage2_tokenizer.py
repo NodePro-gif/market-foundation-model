@@ -305,7 +305,7 @@ def bpe_encode(chars, merge_arr, new_ids, mul=BPE_V):
             idx = idx[np.insert(np.diff(idx) > 1, 0, True)]
         span = _merge(span, idx, span[idx] + span[idx + 1])
         data = _merge(data, idx, int(new_ids[m]))
-    return data.astype(np.uint16), span.astype(np.uint8)
+    return data.astype(np.uint16), span.astype(np.uint32)
 
 
 def step_c():
