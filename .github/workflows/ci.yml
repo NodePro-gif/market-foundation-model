@@ -43,5 +43,8 @@ jobs:
       - name: Validate Colab notebook JSON
         run: python -c "import json; json.load(open('notebooks/Market_Foundation_Model_T4.ipynb', encoding='utf-8'))"
 
+      - name: Validate Kaggle notebook JSON
+        run: python -c "import json; json.load(open('notebooks/Market_Foundation_Model_Kaggle_GPU.ipynb', encoding='utf-8'))"
+
       - name: Check dependency consistency
         run: python -m pip check
