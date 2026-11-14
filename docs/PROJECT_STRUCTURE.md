@@ -8,7 +8,7 @@ This document describes the current repository layout. Training scripts intentio
 
 | File | Purpose |
 |---|---|
-| `stage1_corpus.py` | Download and verify the multi-asset corpus in the Colab layout |
+| `stage1_corpus.py` | Download and validate the multi-asset corpus |
 | `download_local.py` | Download corpus files for a local workstation |
 | `stage2_tokenizer.py` | Parse bars, derive market attributes, train BPE and write token/label artifacts |
 | `test_tokenizer.py` | Self-test BPE merge and encoding behavior |
@@ -32,7 +32,7 @@ This document describes the current repository layout. Training scripts intentio
 
 | Directory | Contents | Version-control policy |
 |---|---|---|
-| `ckpt/` | Pretrained checkpoint and compact training log | Selected checkpoint retained |
+| `ckpt/` | Pretrained checkpoint, resumable state and training log | Generated locally; ignored by Git |
 | `results/` | Metrics, plots, prediction exports and baseline artifacts | Selected research outputs retained |
 | `corpus/`, `npz/`, `mkt/`, `parts/` | Downloaded data and regenerated intermediate artifacts | Ignored by Git |
 | `results/finetune/` | Fine-tuning outputs | Metrics retained; large model/array/CSV artifacts ignored |
