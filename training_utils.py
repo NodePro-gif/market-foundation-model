@@ -141,12 +141,8 @@ def perplexity_from_loss(loss):
 
 
 def split_2022_periods(sample_timestamps):
-    """Split 2022 into Jan-Jun calibration, Jul-Sep threshold, Oct-Dec horizon masks."""
-    july = 1656633600  # 2022-07-01 00:00:00 UTC
-    october = 1664582400  # 2022-10-01 00:00:00 UTC
+    """Split Unix-second timestamps into Jan-Jun calibration and Jul-Dec policy masks."""
+    cutoff = 1656633600  # 2022-07-01 00:00:00 UTC
     timestamps = [int(value) for value in sample_timestamps]
-    return (
-        [value < july for value in timestamps],
-        [july <= value < october for value in timestamps],
-        [value >= october for value in timestamps],
-    )
+    return ([value < cutoff for value in timestamps],
+            [value >= cutoff for value in timestamps])
