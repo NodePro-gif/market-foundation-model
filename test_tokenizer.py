@@ -83,6 +83,19 @@ for trial in range(5):
     else:
         print(f"  OK  random trial {trial}: {len(seq)} chars -> {len(e)} tokens")
 
+print("== long token span regression (>255 bars) ==")
+# Repeatedly merge pairs to create a token spanning 512 source bars.
+long_merges = np.array([[0, 0]] + [[255 + i, 255 + i] for i in range(1, 9)],
+                       dtype=np.int32)
+long_ids = 256 + np.arange(len(long_merges), dtype=np.int32)
+long_tokens, long_spans = st.bpe_encode(np.zeros(512, dtype=np.int64),
+                                        long_merges, long_ids)
+if int(long_spans.sum()) != 512 or int(long_spans.max()) != 512:
+    fails += 1
+    print(f"  FAIL long-span: sum={int(long_spans.sum())} max={int(long_spans.max())}")
+else:
+    print(f"  OK long-span: dtype={long_spans.dtype}, max={int(long_spans.max())}")
+
 print("== BPE training sanity (toy corpus) ==")
 # train_bpe uses the global N_MERGES; patch it for the toy run
 orig = st.N_MERGES

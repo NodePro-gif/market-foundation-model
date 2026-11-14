@@ -138,10 +138,10 @@ The committed experiment records include:
 
 - Pretraining checkpoint: `ckpt/best.pt`.
 - Pretraining validation loss recorded at step 3,000: **5.8945**.
-- XAUUSD fine-tuning experiment (CPU run, 2 epochs): accuracy **0.5872**, AUC **0.6792**, Brier score **0.2279**.
+- XAUUSD fine-tuning experiment (historical CPU run, 2 epochs): accuracy **0.5872**, AUC **0.6792**, Brier score **0.2279**. This predates the corrected checkpoint-selection split and is not a benchmark of the current code.
 - Frozen-backbone transfer probe: held-out 2023 AUC of **0.7407** for NIKKEI, **0.6320** for BRENT and **0.6005** for EURGBP.
 
-These values describe specific historical runs and configurations. They are not a single unified benchmark and should not be interpreted as live-trading performance. In particular, transaction-cost assumptions and the evaluation protocol must be checked before drawing profitability conclusions. Detailed records are in `results/`, `PROGRESS.md` and the reproducibility guide.
+These values describe specific historical runs and configurations. They are not a single unified benchmark, and the historical fine-tuning result predates the corrected train/validation/test checkpoint-selection logic. They should not be interpreted as live-trading performance. In particular, transaction-cost assumptions and the evaluation protocol must be checked before drawing profitability conclusions. Detailed records are in `results/`, `PROGRESS.md` and the reproducibility guide.
 
 ## Quality checks
 
