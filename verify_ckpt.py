@@ -36,6 +36,8 @@ def main():
     fingerprint = s3.tokenizer_fingerprint()
     if manifest.get("tokenizer_fingerprint") != fingerprint:
         raise SystemExit("TOKENIZER MISMATCH: retrain stage3 before fine-tuning")
+    if manifest.get("checkpoint_sha256") != s3.sha256_file(ckpt):
+        raise SystemExit("CHECKPOINT DIGEST MISMATCH: retrain stage3 or restore matching manifest")
     model = s3.MarketGPT().to(s3.DEVICE)
     sd = torch.load(ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(sd)
