@@ -490,16 +490,26 @@ def main():
             early_stopper.load_state_dict(state["early_stopper"])
         elif math.isfinite(best_val):
             early_stopper.best = best_val
-        if state.get("loader_rng") is not None:
-            generator.set_state(state["loader_rng"])
-        torch.set_rng_state(state["torch_rng"])
-        np.random.set_state(state["numpy_rng"])
-        if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
-            cuda_rng = state["cuda_rng"]
-            if isinstance(cuda_rng, (list, tuple)) and len(cuda_rng) > LOCAL_RANK:
-                torch.cuda.set_rng_state(cuda_rng[LOCAL_RANK])
-            elif RANK == 0:
-                torch.cuda.set_rng_state_all(cuda_rng)
+        rank_rng = state.get("rank_rng")
+        if rank_rng is not None:
+            rng = rank_rng[RANK]
+            torch.set_rng_state(rng["torch_rng"])
+            np.random.set_state(rng["numpy_rng"])
+            generator.set_state(rng["loader_rng"])
+            if DEVICE.type == "cuda" and rng.get("cuda_rng") is not None:
+                torch.cuda.set_rng_state(rng["cuda_rng"], device=DEVICE)
+        else:
+            # Backward-compatible restore from older single-rank checkpoints.
+            if state.get("loader_rng") is not None:
+                generator.set_state(state["loader_rng"])
+            torch.set_rng_state(state["torch_rng"])
+            np.random.set_state(state["numpy_rng"])
+            if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
+                cuda_rng = state["cuda_rng"]
+                if isinstance(cuda_rng, (list, tuple)) and len(cuda_rng) > LOCAL_RANK:
+                    torch.cuda.set_rng_state(cuda_rng[LOCAL_RANK], device=DEVICE)
+                elif RANK == 0:
+                    torch.cuda.set_rng_state_all(cuda_rng)
         best_path = os.path.join(CKPT, "best.pt")
         manifest_ok = False
         if os.path.isfile(best_path) and os.path.isfile(manifest_path):
@@ -540,12 +550,12 @@ def main():
                 tot += loss.item() * valid_tokens
                 n += valid_tokens
         model.train()
-        if n == 0:
-            raise RuntimeError("validation produced zero non-padding targets")
         if DISTRIBUTED:
             totals = torch.tensor([tot, n], dtype=torch.float64, device=DEVICE)
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
             tot, n = totals.tolist()
+        if n == 0:
+            raise RuntimeError("validation produced zero non-padding targets")
         return tot / n
 
     model.train()
@@ -625,6 +635,17 @@ def main():
                             log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
                         sync_workers()
                 if step % CKPT_EVERY == 0:
+                    local_rng = dict(
+                        torch_rng=torch.get_rng_state(),
+                        numpy_rng=np.random.get_state(),
+                        loader_rng=generator.get_state(),
+                        cuda_rng=torch.cuda.get_rng_state(DEVICE) if DEVICE.type == "cuda" else None,
+                    )
+                    if DISTRIBUTED:
+                        gathered_rng = [None] * WORLD_SIZE if IS_MAIN else None
+                        dist.gather_object(local_rng, gathered_rng, dst=0)
+                    else:
+                        gathered_rng = [local_rng]
                     if IS_MAIN:
                         atomic_torch_save(dict(
                             model=unwrap_model(model).state_dict(), optimizer=opt.state_dict(),
@@ -632,8 +653,9 @@ def main():
                             lr_controller=lr_controller.state_dict(),
                             early_stopper=early_stopper.state_dict(),
                             history=hist, tokenizer_fingerprint=fingerprint,
-                            torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
-                            loader_rng=generator.get_state(),
+                            rank_rng=gathered_rng,
+                            torch_rng=local_rng["torch_rng"], numpy_rng=local_rng["numpy_rng"],
+                            loader_rng=local_rng["loader_rng"],
                             cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
                         ), os.path.join(CKPT, "resume.pt"))
                         atomic_json(LOG, hist)
