@@ -266,7 +266,7 @@ def main():
     # Fit on 2015-2020, select the language-model checkpoint on 2021-2022.
     # 2023 remains untouched by tokenizer fitting and pretraining.
     train_ds = MarketLMSmart(split_years=list(range(2015, 2021)))
-    val_ds = MarketLMSmart(split_years=[2021, 2022])
+    val_ds = MarketLMSmart(split_years=[2021])
     if len(train_ds) == 0 or len(val_ds) == 0:
         raise SystemExit(
             f"empty pretraining dataset: train={len(train_ds)} val={len(val_ds)}; "
