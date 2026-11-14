@@ -1,21 +1,9 @@
 #!/usr/bin/env python
 """Honest validation pass for the stage-4 direction head.
 
-Fixes three problems at once:
-
-1. Calibration      - fit Platt scaling on the reserved 2022 period (not on the test set),
-                      report final-test ECE before/after.
-2. Threshold choice - pick the betting threshold on the reserved 2022 period, lock it,
-                      then touch 2023 exactly once (no post-hoc selection).
-3. Profitability    - the round-trip cost is paid once per position, so
-                      holding k bars amortises it. Sweep the holding horizon
-                      and report where net > 0 at real cost levels.
-
-Usage (same env as the stage4 run):
-    $env:ST4_STRIDE="256"; $env:ST4_TEST_STRIDE="64"
-    python validate_stage4.py
+Calibration and policy selection use 2022 only. The 2023 final period is
+accessed after the policy is locked and its predictions/bars are saved once.
 """
-
 import json
 import os
 import time
@@ -29,9 +17,8 @@ from training_utils import split_2022_periods
 
 import stage4_finetune as s4
 
-VAL_YEARS = (2022,)  # reserved for calibration/threshold selection
-HORIZONS = (1, 3, 6, 12, 24, 48)          # holding horizons evaluated on validation only
-# 0.5 / 1.5 / 3.0 bps PER SIDE (1 bps = 1e-4); round trip = 2 sides
+VAL_YEARS = (2022,)
+HORIZONS = (1, 3, 6, 12, 24, 48)
 COSTS_SIDE = (0.00005, 0.00015, 0.00030)
 MIN_BETS = 100
 THR_GRID = np.round(np.arange(0.50, 0.801, 0.025), 3)
@@ -76,20 +63,13 @@ def predict(ds):
                 pd, _, _ = model(xb)
             ps.append(torch.sigmoid(pd).float().cpu().numpy())
             ys.append(yd.numpy() if torch.is_tensor(yd) else np.asarray(yd))
+    if not ps:
+        raise SystemExit("prediction dataset produced no batches")
     return np.concatenate(ps), np.concatenate(ys)
 
 
-def next_returns(b, c, k):
-    """Simple return of holding k bars from each window end bar b."""
-    b = np.asarray(b, dtype=np.int64)
-    ok = b + k < len(c)
-    out = np.full(len(b), np.nan)
-    out[ok] = (c[b[ok] + k] - c[b[ok]]) / c[b[ok]]
-    return out
-
-
 def best_threshold(p, y, b, c, cost):
-    """Pick threshold on THIS split: net return after round-trip cost."""
+    """Pick threshold on the 2022 policy split: net return after costs."""
     best = None
     for t in THR_GRID:
         sig = np.where(p >= t, 1, np.where(p <= 1 - t, -1, 0))
@@ -111,13 +91,14 @@ def main():
     final_test_lock = os.path.join(OUT, "FINAL_TEST_2023_ACCESSED.lock")
     if os.path.exists(final_test_lock) and os.environ.get("MFM_ALLOW_FINAL_TEST_RERUN") != "1":
         raise SystemExit("2023 final-test lock exists; set MFM_ALLOW_FINAL_TEST_RERUN=1 only for an explicitly authorized rerun")
-    # Invalidate prior validation artifacts before starting a fresh calibration run.
-    for stale in ("test_pred.npy", "test_y.npy", "test_pred_cal.npy", "validation.json", "backtest.json"):
+    # Invalidate artifacts from any earlier validation attempt.
+    for stale in ("test_pred.npy", "test_y.npy", "test_bars.npy",
+                  "test_pred_cal.npy", "validation.json", "backtest.json"):
         stale_path = os.path.join(OUT, stale)
         if os.path.isfile(stale_path):
             os.remove(stale_path)
-    # Split 2022 chronologically: Jan-Jun fits Platt calibration; Jul-Dec
-    # selects threshold and holding horizon. No observation serves both roles.
+
+    # Calibration and policy selection are isolated within 2022.
     val_ds = s4.FinetuneDS(s4.TARGET_SYM, years=VAL_YEARS,
                            stride=s4.TEST_STRIDE)
     if len(val_ds) < 200:
@@ -129,12 +110,12 @@ def main():
     sample_ts = all_ts[bars_all]
     cal_mask, policy_mask = [np.asarray(mask, dtype=bool)
                              for mask in split_2022_periods(sample_ts)]
-    # Purge calibration labels whose longest 288-bar target reaches July.
     july_bar = int(np.searchsorted(all_ts, 1656633600, side="left"))
     cal_mask &= (bars_all + 288) < july_bar
     if cal_mask.sum() < 100 or policy_mask.sum() < 100:
         raise SystemExit("insufficient samples in one 2022 half; reduce ST4_TEST_STRIDE")
     log(f"2022 calibration samples={int(cal_mask.sum())}, policy samples={int(policy_mask.sum())}")
+
     p_all, y_all = predict(val_ds)
     if len(p_all) != len(bars_all):
         raise SystemExit("2022 prediction/window mismatch")
@@ -146,17 +127,16 @@ def main():
     if len(np.unique(y_cal)) != 2 or len(np.unique(y_policy)) != 2:
         raise SystemExit("both target classes are required in each 2022 half")
 
-    # Probability calibration is fit only on Jan-Jun 2022.
     from sklearn.linear_model import LogisticRegression
     eps = 1e-6
-    lcal = np.log(np.clip(p_cal, eps, 1 - eps) /
-                  (1 - np.clip(p_cal, eps, 1 - eps)))
+    clipped = np.clip(p_cal, eps, 1 - eps)
+    lcal = np.log(clipped / (1 - clipped))
     platt = LogisticRegression(C=1e6, max_iter=1000).fit(
         lcal.reshape(-1, 1), y_cal)
 
     def cal(p):
-        logits = np.log(np.clip(p, eps, 1 - eps) /
-                        (1 - np.clip(p, eps, 1 - eps)))
+        clipped_p = np.clip(p, eps, 1 - eps)
+        logits = np.log(clipped_p / (1 - clipped_p))
         return platt.predict_proba(logits.reshape(-1, 1))[:, 1]
 
     pcc, ppc = cal(p_cal), cal(p_policy)
@@ -164,7 +144,6 @@ def main():
     log(f"calibration Brier/ECE raw={brier_ece(p_cal, y_cal)} calibrated={brier_ece(pcc, y_cal)}")
     log(f"policy Brier/ECE raw={brier_ece(p_policy, y_policy)} calibrated={brier_ece(ppc, y_policy)}")
 
-    # Threshold and holding horizon are selected only on Jul-Dec 2022.
     COST = COSTS_SIDE[1]
     pick = best_threshold(ppc, y_policy, b_policy, c, COST)
     if pick is None:
@@ -193,20 +172,19 @@ def main():
         f"trades={chosen['trades']}, net={chosen['net'][str(COSTS_SIDE[1])]:+.3%}")
 
     # ------------------------------------------------------------ locked final test
-    # Record access before constructing the 2023 dataset to prevent accidental tuning loops.
+    # The lock is written only after every calibration/policy choice is final.
     with open(final_test_lock, "w", encoding="utf-8") as lock:
         lock.write("2023 final test accessed after 2022 policy selection")
-    # Do not instantiate or infer on 2023 until calibration, threshold and
-    # holding horizon have all been selected using 2022 only.
     test_ds = s4.FinetuneDS(s4.TARGET_SYM, years=[2023],
                             stride=s4.TEST_STRIDE)
-    bt = np.asarray(test_ds.bars)
+    bt = np.asarray(test_ds.bars, dtype=np.int64)
     pred, y = predict(test_ds)
-    if len(bt) != len(pred):
-        raise SystemExit(f"window mismatch: rebuilt {len(bt)} vs predicted {len(pred)}")
+    if len(bt) != len(pred) or len(y) != len(pred):
+        raise SystemExit(f"2023 window mismatch: bars={len(bt)}, pred={len(pred)}, labels={len(y)}")
     pc = cal(pred)
     np.save(f"{OUT}/test_pred.npy", pred)
     np.save(f"{OUT}/test_y.npy", y)
+    np.save(f"{OUT}/test_bars.npy", bt)
 
     res = dict(
         calibration_period="2022-01-01/2022-06-30",
@@ -227,28 +205,24 @@ def main():
     sig = np.where(pc >= thr, 1, np.where(pc <= 1 - thr, -1, 0))
     m = sig != 0
     log(f"test bets with locked threshold {thr}: {int(m.sum())} "
-        f"of {len(sig)} "
-        f"(acc {float(((pred[m] >= .5) == y[m]).mean()):.4f})")
+        f"of {len(sig)} (acc {float(((pred[m] >= .5) == y[m]).mean()):.4f})")
 
-    # Evaluate only the policy already selected on 2022. Never sweep
-    # thresholds or holding horizons on the final test.
+    # Evaluate only the policy selected on 2022. No final-test sweep.
     test_policy = None
-    if k_best is not None:
-        eligible = m & (bt + k_best < len(c))
-        sim = simulate_non_overlapping(c, bt[eligible], sig[eligible],
-                                       k_best, COSTS_SIDE[1])
-        test_policy = dict(horizon=k_best, cost_per_side=COSTS_SIDE[1],
-                           trades=sim["trade_count"],
-                           gross_compounded=sim["gross_compounded"],
-                           net_compounded=sim["net_compounded"],
-                           max_drawdown=sim["max_drawdown"])
-        log(f"locked 2023 policy: horizon={k_best}, trades={sim['trade_count']}, "
-            f"net={sim['net_compounded']:+.3%}, maxDD={sim['max_drawdown']:.3%}")
-    res["test_policy"] = test_policy
+    eligible = m & (bt + k_best < len(c))
+    sim = simulate_non_overlapping(c, bt[eligible], sig[eligible],
+                                   k_best, COSTS_SIDE[1])
+    test_policy = dict(horizon=k_best, cost_per_side=COSTS_SIDE[1],
+                       trades=sim["trade_count"],
+                       gross_compounded=sim["gross_compounded"],
+                       net_compounded=sim["net_compounded"],
+                       max_drawdown=sim["max_drawdown"])
+    log(f"locked 2023 policy: horizon={k_best}, trades={sim['trade_count']}, "
+        f"net={sim['net_compounded']:+.3%}, maxDD={sim['max_drawdown']:.3%}")
 
+    res["test_policy"] = test_policy
     with open(f"{OUT}/validation.json", "w") as fh:
         json.dump(res, fh, indent=1)
-    np.save(f"{OUT}/val_pred.npy", p_all)
     np.save(f"{OUT}/val_pred_cal.npy", cal(p_all))
     np.save(f"{OUT}/test_pred_cal.npy", pc)
     log(f"wrote {OUT}/validation.json")
