@@ -85,10 +85,13 @@ class FinetuneDS(Dataset):
 
     def __init__(self, sym, years, stride=8):
         self.sym = sym
-        lab = np.load(f"{MKT}/lab_{sym}.npz")
-        z = np.load(f"{MKT}/tok_{sym}_M5.npz")
-        tok = z["tokens"].astype(np.int64)
-        span = z["spans"].astype(np.int64)
+        with np.load(f"{MKT}/lab_{sym}.npz") as archive:
+            lab = {key: archive[key] for key in archive.files}
+        # Use the same decompressed .npy mmap cache as Stage 3. This avoids
+        # inflating the full compressed token stream in every DataLoader worker.
+        tok = s3._tok_cache((sym, "M5"))
+        with np.load(f"{MKT}/tok_{sym}_M5.npz") as archive:
+            span = archive["spans"].astype(np.int64)
         bar_of_tok = np.concatenate(([0], np.cumsum(span)))[:-1]
         ts = lab["ts"]
         n = min(len(ts), int(bar_of_tok[-1] + span[-1]))
@@ -157,13 +160,9 @@ class FinetuneDS(Dataset):
                 torch.from_numpy(y_q), torch.from_numpy(valid_q))
 
 
-_tokmem = {}
-
-
 def _tokens(sym):
-    if sym not in _tokmem:
-        _tokmem[sym] = np.load(f"{MKT}/tok_{sym}_M5.npz")["tokens"].astype(np.int64)
-    return _tokmem[sym]
+    # A read-only mmap keeps worker RAM low; the OS page cache is shared.
+    return s3._tok_cache((sym, "M5"))
 
 
 # ------------------------------------------------------------------ model
@@ -285,6 +284,7 @@ def run_epoch(model, dl, opt=None, tag="", scheduler=None):
     n_steps = len(dl)
     every = max(1, n_steps // 10)
     ep_t0 = time.time()
+    seen_samples = 0
     if training:
         opt.zero_grad(set_to_none=True)
     for i, (xb, yd, yv, yq, vq) in enumerate(dl):
@@ -314,13 +314,18 @@ def run_epoch(model, dl, opt=None, tag="", scheduler=None):
                 if scheduler is not None:
                     scheduler.step()
                 opt.zero_grad(set_to_none=True)
+        seen_samples += len(xb)
         if training and (i % every == 0 or i == n_steps - 1):
-            el = time.time() - ep_t0
+            el = max(time.time() - ep_t0, 1e-6)
             eta = el * (n_steps - i - 1) / max(i + 1, 1)
+            samples_s = seen_samples / el
+            peak_gib = (torch.cuda.max_memory_allocated(DEVICE) / 1024**3
+                        if DEVICE.type == "cuda" else 0.0)
             log(f"  {tag} step {i+1:>4}/{n_steps} "
                 f"({100*(i+1)/n_steps:3.0f}%) loss={loss.item():.4f} "
                 f"dir={l_dir.item():.4f} vol={l_vol.item():.4f} "
-                f"q={l_q.item():.4f} elapsed={el:.0f}s eta={eta:.0f}s")
+                f"q={l_q.item():.4f} samples/s={samples_s:.1f} "
+                f"peak_vram={peak_gib:.2f}GiB elapsed={el:.0f}s eta={eta:.0f}s")
         b = len(xb)
         tot["dir"] += l_dir.item() * b
         tot["vol"] += l_vol.item() * b
@@ -360,6 +365,15 @@ def main():
     log(f"loading pretrained from {ckpt}")
     base = load_base(ckpt)
     model = FinetuneGPT(base).to(DEVICE)
+    compile_enabled = DEVICE.type == "cuda" and _env("MFM_TORCH_COMPILE", 0, int) == 1
+    if compile_enabled and hasattr(model, "compile"):
+        compile_mode = os.environ.get("MFM_COMPILE_MODE", "reduce-overhead")
+        model.compile(mode=compile_mode)
+        log(f"torch.compile enabled (mode={compile_mode}); ignore initial compile warm-up when comparing throughput")
+    elif compile_enabled:
+        log("torch.compile unavailable in this PyTorch build; using eager execution")
+    if DEVICE.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f"finetune model params: {n_params/1e6:.2f}M on {DEVICE}; "
         f"batch={BATCH} x accum={ACCUM_STEPS}; AMP={USE_AMP}; workers={NUM_WORKERS}")

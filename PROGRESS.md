@@ -1,3 +1,12 @@
+# 2026-11-14 — T4 throughput tuning
+
+- Reused Stage-3 `.npy` memory-mapped token cache inside Stage-4 datasets and DataLoader workers, avoiding repeated full-token NPZ decompression and per-worker int64 copies.
+- Loaded Stage-4 label arrays from NPZ into regular arrays with the archive closed, avoiding persistent ZIP handles in worker processes.
+- Added opt-in `torch.compile(mode='reduce-overhead')` to both stages and enabled it in the Colab T4 notebook; eager fallback remains available with `MFM_TORCH_COMPILE=0`.
+- Added measured samples/windows per second and peak allocated VRAM telemetry to training logs.
+- Increased Colab fine-tuning DataLoader workers from 2 to 4; batch sizes and effective batch sizes remain unchanged to avoid silently changing optimization dynamics.
+- No T4 hardware benchmark has yet been run. Compare steady-state throughput after compile warm-up and tune worker count/batch size based on actual VRAM and GPU utilization.
+
 # PROGRESS — log kronologis
 
 ## 2026-11-14 — T4 throughput optimization
