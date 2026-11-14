@@ -85,7 +85,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-For Google Colab, PyTorch is normally preinstalled. Install the remaining dependencies with:
+For Google Colab, PyTorch is normally preinstalled. The notebook keeps datasets and checkpoints on the VM's local `/content` disk during active work, then synchronizes artifacts to Drive; this avoids repeated training I/O through the Drive FUSE mount. Install the remaining dependencies with:
 
 ```bash
 pip install numpy pandas scikit-learn matplotlib
@@ -117,8 +117,8 @@ For the fine-tuning script, selected settings can be overridden through environm
 | Variable | Default | Meaning |
 |---|---:|---|
 | `ST4_EPOCHS` | 3 | Fine-tuning epochs |
-| `ST4_BATCH` | 32 | GPU micro-batch |
-| `ST4_ACCUM` | 8 | Gradient-accumulation steps (effective batch 256) |
+| `ST4_BATCH` | 64 | GPU micro-batch (T4 starting point) |
+| `ST4_ACCUM` | 4 | Gradient-accumulation steps (effective batch 256) |
 | `ST4_LR` | 0.0001 | Peak learning rate |
 | `ST4_WARMUP_RATIO` | 0.08 | Fraction of optimizer updates used for linear warmup |
 | `ST4_MIN_LR_RATIO` | 0.10 | Minimum LR as a fraction of peak LR after cosine decay |
@@ -128,7 +128,8 @@ For the fine-tuning script, selected settings can be overridden through environm
 | `ST4_TEST_STRIDE` | 4 | Calibration/final-test inference stride |
 | `ST4_HELD_STRIDE` | 8 | Held-out asset evaluation stride |
 | `ST4_AMP` | 1 | Enable FP16 mixed precision on CUDA |
-| `ST4_WORKERS` | 0 | DataLoader worker processes |
+| `ST4_WORKERS` | 2 | DataLoader worker processes |
+| `ST4_PREFETCH` | 4 | Prefetched batches per worker |
 
 Example for a smaller CPU run (PowerShell):
 
@@ -143,13 +144,13 @@ python -u stage4_finetune.py
 
 **Current research protocol:** fit tokenizer statistics and BPE on non-held-out assets from 2015–2020; pretrain on 2015–2020 and select the pretraining checkpoint on 2021; fine-tune on 2015–2020 and select the supervised checkpoint on 2021; calibrate on 2022; reserve 2023 as the final test. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; historical metrics predate the corrected protocol; model checkpoints are generated locally and are not distributed in Git.
 
-For pretraining on Colab T4, the notebook defaults to micro-batch 32 with 2 gradient-accumulation steps (effective batch 64), FP16 AMP and periodic resumable checkpoints. Fine-tuning defaults to micro-batch 32 with 8 accumulation steps (effective batch 256) and samples training windows with equal probability per non-held-out asset; checkpoint selection remains XAUUSD 2021. These are starting configurations, not guaranteed optimal settings for every runtime. Tune them only using training/validation behavior, never the final test set.
+For pretraining on Colab T4, the notebook defaults to micro-batch 64 with 1 gradient-accumulation step (effective batch 64), FP16 AMP, 4 DataLoader workers, prefetched batches and periodic resumable checkpoints. Compressed token arrays are materialized once per worker rather than decompressed for every sample. Fine-tuning defaults to micro-batch 64 with 4 accumulation steps (effective batch 256), 2 DataLoader workers and non-blocking host-to-device transfers and samples training windows with equal probability per non-held-out asset; checkpoint selection remains XAUUSD 2021. These are starting configurations, not guaranteed optimal settings for every runtime. Tune them only using training/validation behavior, never the final test set.
 
 Fine-tuning now uses AdamW with linear warmup followed by cosine decay, gradient clipping, and early stopping based only on XAUUSD 2021 validation AUC. Multi-task prediction heads use LayerNorm, a 128-unit GELU layer, and dropout to regularize the shared-backbone outputs. The default 3 epochs are a ceiling; training may stop earlier. The pretrained GPT backbone architecture and parameter shapes are intentionally preserved so the regenerated Stage-3 checkpoint remains load-compatible; architecture changes that alter tensor shapes require a complete fresh pretraining run.
 
 The final portfolio simulator is sequential and non-overlapping: it holds at most one position, ignores new signals until exit, compounds returns, and applies entry/exit costs multiplicatively. Validation threshold and holding horizon are selected with the same portfolio logic on 2022 before the locked 2023 test. This is still a simplified bar-close simulator; broker-specific spread, slippage, financing, latency and execution rules must be supplied before live use.
 
-The Colab notebook uses `PRETRAIN_BATCH=32`, `PRETRAIN_ACCUM=2` (effective batch 64), `PRETRAIN_STEPS=6000`, `PRETRAIN_CKPT_EVERY=1000`, `PRETRAIN_EVAL_EVERY=250`, `PRETRAIN_WORKERS=2`, and `PRETRAIN_RESUME=1`. Resume restores model/optimizer state and RNG state; the current DataLoader epoch restarts, so a few batches can be repeated. If tokenizer artifacts are regenerated, remove the old `ckpt/resume.pt` before starting a fresh run. Generated checkpoints under `ckpt/` are intentionally excluded from Git.
+The Colab notebook uses `PRETRAIN_BATCH=64`, `PRETRAIN_ACCUM=1` (effective batch 64), `PRETRAIN_STEPS=6000`, `PRETRAIN_CKPT_EVERY=500`, `PRETRAIN_EVAL_EVERY=500`, `PRETRAIN_WORKERS=4`, `PRETRAIN_PREFETCH=4`, and `PRETRAIN_RESUME=1`. Resume restores model/optimizer state and RNG state; the current DataLoader epoch restarts, so a few batches can be repeated. If tokenizer artifacts are regenerated, remove the old `ckpt/resume.pt` before starting a fresh run. Generated checkpoints under `ckpt/` are intentionally excluded from Git.
 
 For a full reproduction, follow [Reproducibility and data protocol](docs/REPRODUCIBILITY.md) and the experiment notes in [PROGRESS.md](PROGRESS.md). Do not compare runs unless their data split, stride, seed, model checkpoint and cost assumptions match.
 
