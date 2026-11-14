@@ -459,10 +459,13 @@ def step_c():
 
     np.savez(f"{OUT}/bpe.npz", merges=merge_arr, new_ids=new_ids)
     with open(f"{OUT}/vocab.json", "w") as fh:
-        json.dump(dict(base=BASE_V, content=BPE_V, vocab=VOCAB, merges=int(len(merge_arr)),
-                       PAD=PAD, BOS=BOS, EOS=EOS, SYM0=SYM0, TF0=TF0,
-                       REG0=REG0, SESS0=SESS0, symbols=SYMBOLS,
-                       held_out=HELD_OUT, tf_list=TF_LIST), fh, indent=1)
+        json.dump(dict(schema_version=2,
+                       encoding="OHLCV-4x4-attribute-bins+BPE+context-v1",
+                       base=BASE_V, content=BPE_V, vocab=VOCAB,
+                       merges=int(len(merge_arr)), PAD=PAD, BOS=BOS, EOS=EOS,
+                       SYM0=SYM0, TF0=TF0, REG0=REG0, SESS0=SESS0,
+                       symbols=SYMBOLS, held_out=HELD_OUT, tf_list=TF_LIST),
+                  fh, indent=1)
     log("STEP C done")
     log(f"compression summary (sym, tf, bars, tokens, ratio): {summary[:6]} ...")
 
