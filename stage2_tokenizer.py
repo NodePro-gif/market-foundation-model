@@ -188,7 +188,9 @@ def step_b():
             # rv[i] = std of returns rr[i+1..i+k] = cs[i+k+1]-cs[i+1]
             rv[: len(rr) - k] = np.sqrt(
                 np.maximum(cs[k + 1:len(rr) + 1] - cs[1:len(rr) - k + 1], 0) / k)
-            v = rv[train_mask][::7]
+            future_idx = np.minimum(np.arange(len(rv)) + k, len(rv) - 1)
+            rv_train_mask = train_mask & (years_from_ts(z["ts"])[future_idx] <= TRAIN_END_YEAR)
+            v = rv[rv_train_mask][::7]
             v = v[np.isfinite(v)]
             if len(v):
                 vsample.append(v[:80000])
@@ -363,8 +365,14 @@ def step_c():
         enc, spans = bpe_encode(ch, merge_arr, new_ids)
         np.savez_compressed(f"{OUT}/tok_{sym}_{tf}.npz", tokens=enc, spans=spans)
         bar_of_tok = np.concatenate(([0], np.cumsum(spans.astype(np.int64))))[:-1]
-        token_years = years_from_ts(rr["ts"])[bar_of_tok]
+        bar_years = years_from_ts(rr["ts"])
+        token_years = bar_years[bar_of_tok]
+        token_end_bars = np.minimum(bar_of_tok + spans.astype(np.int64) - 1,
+                                    len(bar_years) - 1)
+        token_end_years = bar_years[token_end_bars]
         np.save(f"{OUT}/year_{sym}_{tf}.npy", token_years.astype(np.int16))
+        np.save(f"{OUT}/year_end_{sym}_{tf}.npy",
+                token_end_years.astype(np.int16))
         summary.append((sym, tf, len(ch), len(enc), round(len(ch) / max(len(enc), 1), 3)))
         log(f"  encoded {sym}/{tf}: {len(ch):,} bars -> {len(enc):,} tokens "
             f"(compression {len(ch)/max(len(enc),1):.2f}x)")

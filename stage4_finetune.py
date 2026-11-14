@@ -86,7 +86,11 @@ class FinetuneDS(Dataset):
         inside = tok_of_bar >= 0
         tok_of_bar = np.where(inside, tok_of_bar, idx)
 
-        want = np.isin(years_arr, list(years))
+        requested_years = list(years)
+        want = np.isin(years_arr, requested_years)
+        # Purge samples whose longest target (288 bars) crosses the split.
+        future_idx = np.minimum(np.arange(n) + 288, n - 1)
+        want &= np.isin(years_arr[future_idx], requested_years)
         # window must fit: CTX-5 content tokens after the 5-token prefix
         end_tok = tok_of_bar[:n]
         ok = want & (end_tok >= s3.CTX - 6) & (end_tok < len(tok) - 1)

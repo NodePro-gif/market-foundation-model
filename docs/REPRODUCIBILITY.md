@@ -38,7 +38,7 @@ Some scripts expect artifacts in a specific local or Colab directory. Prepare th
 ## Evaluation safeguards
 
 1. Split chronologically. Never randomly shuffle time-series observations across train and test.
-2. Fit normalization, bins, tokenizer statistics and model parameters without using the final test period. Fit calibration and thresholds on a validation period that is not also used for checkpoint selection when claiming a strict final estimate.
+2. Fit normalization, bins, tokenizer statistics and model parameters on training data only. Purge samples whose longest forward label crosses a split boundary. Fit calibration and thresholds on a period separate from checkpoint selection.
 3. Keep the final test set untouched until model and strategy choices are fixed.
 4. Use purging/embargo or non-overlapping evaluation where label horizons and windows overlap.
 5. Compare against simple baselines on the same dates and with the same costs.

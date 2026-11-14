@@ -114,14 +114,17 @@ class MarketLMSmart(Dataset):
                 bar_of_tok = np.concatenate(([0], np.cumsum(span)))[:-1]
                 if lab is not None and tf == "M5":
                     ts = lab["ts"]
-                    n = min(len(ts), int(bar_of_tok[-1]) + 1)
-                    years = years_from_ts(ts[:n])
+                    n = len(ts)
+                    years = years_from_ts(ts)
                     regime = lab["regime"][:n]
                     sess = lab["sess"][:n]
-                    tok = tok[:int(np.searchsorted(bar_of_tok, n, "right"))]
-                    bar_of_tok = bar_of_tok[:len(tok)]
+                    if int(bar_of_tok[-1] + span[-1]) < n:
+                        raise RuntimeError(f"{sym}/{tf}: token spans do not cover all bars")
+                    last_tok_idx = np.minimum(
+                        np.arange(len(tok)) + CTX - 6, len(tok) - 1)
                     last_bar = np.minimum(
-                        bar_of_tok + CTX, len(years) - 1)  # approx window end
+                        bar_of_tok[last_tok_idx] + span[last_tok_idx] - 1,
+                        n - 1)
                     y0 = years[bar_of_tok]
                     y1 = years[last_bar]
                     ok = np.isin(y0, list(years_set)) & \
@@ -139,12 +142,17 @@ class MarketLMSmart(Dataset):
                         log(f"skip {sym}/{tf}: missing token-year map {ymap_p}")
                         continue
                     ymap = np.load(ymap_p)
-                    m = min(len(ymap), len(tok))
+                    yend_p = f"{MKT}/year_end_{sym}_{tf}.npy"
+                    if not os.path.exists(yend_p):
+                        log(f"skip {sym}/{tf}: missing token end-year map {yend_p}")
+                        continue
+                    yend = np.load(yend_p)
+                    m = min(len(ymap), len(yend), len(tok))
                     if m <= CTX - 5:
                         continue
                     end_idx = np.minimum(np.arange(m) + CTX - 6, m - 1)
                     ok = (np.isin(ymap[:m], list(years_set)) &
-                          np.isin(ymap[end_idx], list(years_set)))
+                          np.isin(yend[end_idx], list(years_set)))
                     offs = np.flatnonzero(ok)[:: self.stride]
                     for off in offs:
                         self.items.append((sym, tf, int(off), None, None))
