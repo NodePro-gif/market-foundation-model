@@ -42,7 +42,8 @@ def simulate_non_overlapping(close, bars, signals, horizon, cost_per_side=0.0001
             "direction": int(signal), "gross_return": gross_return,
             "net_return": net_return,
         })
-        next_available_bar = exit_bar
+        # Require at least one new bar after exit before opening another trade.
+        next_available_bar = exit_bar + 1
 
     returns = np.asarray([t["net_return"] for t in trades], dtype=np.float64)
     gross = np.asarray([t["gross_return"] for t in trades], dtype=np.float64)
