@@ -360,6 +360,21 @@ def main():
         np.random.set_state(state["numpy_rng"])
         if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
             torch.cuda.set_rng_state_all(state["cuda_rng"])
+        best_path = os.path.join(CKPT, "best.pt")
+        manifest_ok = False
+        if os.path.isfile(best_path) and os.path.isfile(manifest_path):
+            with open(manifest_path, encoding="utf-8") as fh:
+                best_manifest = json.load(fh)
+            manifest_ok = (
+                best_manifest.get("tokenizer_fingerprint") == fingerprint
+                and best_manifest.get("checkpoint_sha256") == sha256_file(best_path)
+            )
+        if not manifest_ok:
+            best_val = float("inf")
+            for stale in (best_path, manifest_path):
+                if os.path.isfile(stale):
+                    os.remove(stale)
+            log("previous best checkpoint/manifest unavailable; will select a new best")
         log(f"resumed from step {step}, best_val={best_val:.5f}")
     else:
         # A fresh run must never leave an older best checkpoint eligible for use.
