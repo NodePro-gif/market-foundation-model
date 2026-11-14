@@ -1,16 +1,8 @@
 #!/usr/bin/env python
-"""Cost-aware backtest of the stage-4 direction head.
+"""Evaluate the validation-locked stage-4 policy on the final 2023 test set.
 
-Takes the probabilities written by stage4_finetune.py (results/finetune/
-test_pred.npy), aligns each window with the bar it ended on, and bets on the
-very next M5 bar - the exact horizon the head was trained on (label `nxt`).
-
-Bets are independent: consecutive test windows are `ST4_TEST_STRIDE` bars
-apart, so every bet is entered and closed (cost = 2 sides).
-
-Usage (same env as the stage4 run that produced test_pred.npy):
-    $env:ST4_TEST_STRIDE="64"
-    python backtest_stage4.py
+The threshold and holding horizon must come from validation.json (2022).
+This script deliberately does not sweep thresholds or choose a horizon on 2023.
 """
 
 import json
@@ -20,141 +12,93 @@ import numpy as np
 
 import stage4_finetune as s4
 
-COST_PER_SIDE = 0.00015     # same as check_flip.py / train_xauusd.py
+COST_PER_SIDE = float(os.environ.get("BT_COST_PER_SIDE", "0.00015"))
 OUT = s4.OUT
 
 
-def stats(name, ret, cost_sides=0):
-    """ret = per-bet simple returns (already net of cost if cost applied).
-
-    win_net = fraction of bets that end POSITIVE AFTER cost (not accuracy).
-    """
-    n = len(ret)
-    gross = float(ret.sum())
-    eq = float(np.prod(1 + ret))
-    hit = float((ret > 0).mean()) if n else float("nan")
-    sd = float(ret.std()) if n > 1 else 0.0
-    sharpe = float(ret.mean() / (sd + 1e-12) * np.sqrt(n)) if n > 1 else 0.0
-    return dict(name=name, n=n, total=gross, equity=eq, win_net=hit,
-                sharpe=sharpe, mean_bps=float(ret.mean() * 1e4),
-                cost_sides=cost_sides)
-
-
 def main():
-    pred = np.load(f"{OUT}/test_pred.npy")
-    y = np.load(f"{OUT}/test_y.npy")
-
-    ds = s4.FinetuneDS(s4.TARGET_SYM, years=[2023], stride=s4.TEST_STRIDE)
-    if len(ds.bars) != len(pred):
+    validation_path = os.path.join(OUT, "validation.json")
+    pred_path = os.path.join(OUT, "test_pred_cal.npy")
+    if not os.path.isfile(validation_path) or not os.path.isfile(pred_path):
         raise SystemExit(
-            f"window mismatch: backtest rebuilt {len(ds.bars)} windows but "
-            f"test_pred.npy has {len(pred)} - rerun with the SAME "
-            f"ST4_TEST_STRIDE/ST4_STRIDE env as the stage4 run")
+            "missing validation.json or test_pred_cal.npy; run validate_stage4.py first"
+        )
+    with open(validation_path, encoding="utf-8") as fh:
+        validation = json.load(fh)
+    threshold = float(validation["threshold"])
+    horizon = validation.get("chosen_horizon")
+    if horizon is None:
+        raise SystemExit(
+            "validation did not select a holding horizon; do not choose one on the test set"
+        )
+    horizon = int(horizon)
 
-    lab = np.load(f"{s4.MKT}/lab_{s4.TARGET_SYM}.npz")
-    b = np.asarray(ds.bars, dtype=np.int64)
-    c = lab["c"].astype(np.float64)
+    pred = np.load(pred_path)
+    y = np.load(os.path.join(OUT, "test_y.npy"))
+    ds = s4.FinetuneDS(s4.TARGET_SYM, years=[2023], stride=s4.TEST_STRIDE)
+    if len(ds.bars) != len(pred) or len(y) != len(pred):
+        raise SystemExit(
+            f"window mismatch: rebuilt={len(ds.bars)} calibrated={len(pred)} labels={len(y)}; "
+            "rerun stage4 and validation with the same stride settings"
+        )
+
+    lab = np.load(os.path.join(s4.MKT, f"lab_{s4.TARGET_SYM}.npz"))
+    bars = np.asarray(ds.bars, dtype=np.int64)
+    close = lab["c"].astype(np.float64)
     ts = lab["ts"]
-    nxt = lab["nxt"]
 
-    ok = b + 1 < len(c)
-    b, pred, y = b[ok], pred[ok], y[ok]
-    fwd = (c[b + 1] - c[b]) / c[b]           # next-bar return, the bet horizon
-    up = nxt[b].astype(int)                  # same info as y (sanity)
+    # Only keep trades whose full selected holding horizon exists.
+    valid = bars + horizon < len(close)
+    bars, pred, y = bars[valid], pred[valid], y[valid]
+    signal = np.where(pred >= threshold, 1,
+                      np.where(pred <= 1.0 - threshold, -1, 0))
+    active = signal != 0
+    if not active.any():
+        raise SystemExit("the validation-locked policy produced no test trades")
 
-    long_cost = 2 * COST_PER_SIDE            # enter + exit per independent bet
-    rows = []
-
-    sig = np.where(pred >= 0.5, 1, -1)
-    rows.append(stats("model (p>=0.5)", sig * fwd - long_cost, 2))
-    rows.append(stats("model gross (no cost)", sig * fwd, 0))
-    rows.append(stats("inverse model", -sig * fwd - long_cost, 2))
-    rows.append(stats("always long", fwd - long_cost, 2))
-    rows.append(stats("always short", -fwd - long_cost, 2))
-    rows.append(stats("persistence (repeat last bar)",
-                      np.where(up == 1, 1, -1) * fwd - long_cost, 2))
-
-    # accuracy of the head itself (against label `nxt`), as stage4 reports it
-    hit = float((np.where(pred >= 0.5, 1, 0) == y).mean())
-    brier = float(((pred - y) ** 2).mean())
-
-    # breakeven round-trip cost: where net model return = 0
-    model_gross_mean = rows[1]["mean_bps"] / 1e4          # per bet, no cost
-    breakeven_side_bps = model_gross_mean / 2 * 1e4       # two sides per bet
-
-    equity = np.cumprod(1 + (sig * fwd - long_cost))
-    buyhold = np.cumprod(1 + fwd)
-
-    # --- threshold sweep: bet only on extreme probabilities ---------------
-    sweep = []
-    for t in (0.50, 0.55, 0.60, 0.65, 0.70, 0.75):
-        s2 = np.where(pred >= t, 1, np.where(pred <= 1 - t, -1, 0))
-        m = s2 != 0
-        n = int(m.sum())
-        if n < 10:
-            continue
-        r = s2[m] * fwd[m]
-        tstat = (r.mean() / (r.std() + 1e-12) * np.sqrt(len(r))
-                 if len(r) > 1 else 0.0)
-        sweep.append(dict(
-            threshold=t, n=n,
-            acc=float((np.where(pred[m] >= 0.5, 1, 0) == y[m]).mean()),
-            gross_total=float(r.sum()),
-            net_total=float(r.sum() - n * 2 * COST_PER_SIDE),
-            mean_bps=float(r.mean() * 1e4), t_stat=float(tstat),
-            breakeven_side_bps=float(r.mean() * 1e4 / 2)))
-
-    res = dict(
-        n_bets=int(len(b)), stride=int(s4.TEST_STRIDE),
-        cost_per_side=COST_PER_SIDE,
-        breakeven_cost_per_side_bps=float(breakeven_side_bps),
-        first_ts=int(ts[b[0]]), last_ts=int(ts[b[-1]]),
-        head=dict(acc=hit, brier=brier),
-        strategies=rows,
-        threshold_sweep=sweep,
-        benchmark_buynhold=dict(
-            total=float(buyhold[-1] - 1) if len(buyhold) else 0.0),
+    trade_bars = bars[active]
+    trade_signal = signal[active]
+    gross_returns = trade_signal * (
+        (close[trade_bars + horizon] - close[trade_bars]) / close[trade_bars]
+    )
+    net_returns = gross_returns - 2.0 * COST_PER_SIDE
+    n = int(len(net_returns))
+    gross_total = float(gross_returns.sum())
+    net_total = float(net_returns.sum())
+    result = dict(
+        protocol=dict(validation_year=2022, final_test_year=2023),
+        policy=dict(threshold=threshold, horizon_bars=horizon,
+                    cost_per_side=COST_PER_SIDE),
+        opportunities=int(len(bars)),
+        trades=n,
+        head=dict(
+            accuracy=float((((pred >= 0.5).astype(int)) == y).mean()),
+            brier=float(np.mean((pred - y) ** 2)),
+        ),
+        strategy=dict(
+            gross_sum=gross_total,
+            net_sum=net_total,
+            mean_gross_per_trade=float(gross_returns.mean()),
+            mean_net_per_trade=float(net_returns.mean()),
+            win_rate_after_cost=float((net_returns > 0).mean()),
+            breakeven_cost_per_side=float(gross_returns.mean() / 2.0),
+        ),
+        first_trade_ts=int(ts[trade_bars[0]]),
+        last_trade_ts=int(ts[trade_bars[-1]]),
+        note=("Trade returns are summed, not compounded: positions may overlap "
+              "when the selected holding horizon exceeds the test-window stride."),
     )
     os.makedirs(OUT, exist_ok=True)
-    with open(f"{OUT}/backtest.json", "w") as fh:
-        json.dump(res, fh, indent=1)
-    np.save(f"{OUT}/equity_model.npy", equity)
-    np.save(f"{OUT}/equity_buyhold.npy", buyhold)
+    with open(os.path.join(OUT, "backtest.json"), "w", encoding="utf-8") as fh:
+        json.dump(result, fh, indent=2)
 
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(9, 4.5))
-        plt.plot(equity, label=f"model p>=0.5 net ({rows[0]['equity']:.3f})")
-        plt.plot(buyhold, label=f"buy & hold ({buyhold[-1]:.3f})", alpha=.8)
-        plt.axhline(1.0, color="gray", lw=.7)
-        plt.title(f"Stage4 XAUUSD 2023 - {len(b)} one-bar bets, "
-                  f"stride {s4.TEST_STRIDE}, cost {COST_PER_SIDE}/side")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"{OUT}/equity.png", dpi=120)
-        plt.close()
-    except Exception as e:                      # plotting is optional
-        print("plot skipped:", e)
-
-    print(f"bets={len(b)} stride={s4.TEST_STRIDE} "
-          f"head_acc={hit:.4f} brier={brier:.4f} "
-          f"breakeven_cost={breakeven_side_bps:.3f} bps/side")
-    for r in rows:
-        print(f"  {r['name']:28s} equity={r['equity']:+.4f} "
-              f"total={r['total']:+.4%} win_net={r['win_net']:.4f} "
-              f"mean_bps={r['mean_bps']:+.2f} sharpe={r['sharpe']:+.2f}")
-    print(f"  buy & hold                 equity={buyhold[-1]:+.4f} "
-          f"total={buyhold[-1]-1:+.4%}")
-    print("--- threshold sweep (bet only on extreme p) ---")
-    print(f"  {'thr':>5} {'n':>5} {'acc':>6} {'gross%':>8} {'net%':>8} "
-          f"{'bps/bet':>8} {'t':>6} {'BE bps/side':>13}")
-    for s in sweep:
-        print(f"  {s['threshold']:5.2f} {s['n']:5d} {s['acc']:6.3f} "
-              f"{s['gross_total']*100:8.2f} {s['net_total']*100:8.2f} "
-              f"{s['mean_bps']:8.2f} {s['t_stat']:6.2f} "
-              f"{s['breakeven_side_bps']:13.2f}")
+    print(f"VALIDATION-LOCKED TEST POLICY: threshold={threshold:.3f}, "
+          f"horizon={horizon} bars, cost={COST_PER_SIDE * 1e4:.2f} bps/side")
+    print(f"trades={n}/{len(bars)} gross_sum={gross_total:+.4%} "
+          f"net_sum={net_total:+.4%} win_after_cost={(net_returns > 0).mean():.3f}")
+    print(f"mean_net_per_trade={net_returns.mean() * 1e4:+.3f} bps "
+          f"breakeven_cost={gross_returns.mean() * 0.5 * 1e4:.3f} bps/side")
+    print("No threshold or horizon sweep was performed on the final test set.")
     print("BACKTEST DONE", flush=True)
 
 
