@@ -358,11 +358,11 @@ def main():
         model.eval()
         tot = n = 0
         with torch.no_grad():
-            for i, batch in enumerate(val_dl):
-                if i >= 50:
-                    break
+            for batch in val_dl:
                 xb = batch.to(DEVICE, non_blocking=True)
-                _, loss = model(xb, xb)
+                with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
+                                    enabled=DEVICE.type == "cuda"):
+                    _, loss = model(xb, xb)
                 valid_tokens = int((xb[:, 1:] != PAD).sum().item())
                 tot += loss.item() * valid_tokens
                 n += valid_tokens
