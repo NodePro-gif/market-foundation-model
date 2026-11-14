@@ -404,7 +404,8 @@ def main():
         props = torch.cuda.get_device_properties(DEVICE)
         log(f"GPU={props.name} VRAM={props.total_memory / 1024**3:.1f}GiB "
             f"AMP=FP16 batch={BATCH} accum={ACCUM_STEPS} "
-            f"effective_batch={BATCH * ACCUM_STEPS}")
+            f"effective_global_batch={BATCH * ACCUM_STEPS * WORLD_SIZE} "
+            f"world_size={WORLD_SIZE}")
 
     # Fit on 2015-2020 and select the language-model checkpoint on 2021.
     # 2022 is reserved for calibration; 2023 remains the final untouched test.
@@ -485,7 +486,9 @@ def main():
         torch.set_rng_state(state["torch_rng"])
         np.random.set_state(state["numpy_rng"])
         if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
-            torch.cuda.set_rng_state_all(state["cuda_rng"]) if RANK == 0 else None
+            torch.cuda.set_rng_state(state["cuda_rng"][LOCAL_RANK])
+            if isinstance(state["cuda_rng"], (list, tuple)) and len(state["cuda_rng"]) > LOCAL_RANK
+            else torch.cuda.set_rng_state_all(state["cuda_rng"]) if RANK == 0 else None
         best_path = os.path.join(CKPT, "best.pt")
         manifest_ok = False
         if os.path.isfile(best_path) and os.path.isfile(manifest_path):
@@ -564,7 +567,7 @@ def main():
                 step += 1
                 if step % 50 == 0:
                     elapsed = max(time.time() - perf_t0, 1e-6)
-                    windows_s = perf_windows / elapsed
+                    windows_s = perf_windows * WORLD_SIZE / elapsed
                     peak_gib = (torch.cuda.max_memory_allocated(DEVICE) / 1024**3
                                 if DEVICE.type == "cuda" else 0.0)
                     log(f"step {step:>5} loss={loss.item():.4f} "
