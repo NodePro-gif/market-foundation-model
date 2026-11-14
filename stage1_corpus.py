@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 
 BASE = "https://evtradelabs.com/api/simulator/data"
-ROOT = "/content/corpus"
+ROOT = os.environ.get("MFM_CORPUS_DIR", "/content/corpus")
 
 SYMBOLS = [
     # FX
