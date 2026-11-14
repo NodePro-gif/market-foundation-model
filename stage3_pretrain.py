@@ -144,11 +144,34 @@ _tok_mem = {}
 
 
 def _tok_cache(key):
-    # Materialize compressed NPZ members exactly once per worker process.
-    # Accessing NpzFile["tokens"] for every sample repeatedly decompresses it.
+    # Expand compressed NPZ once to a local .npy, then mmap it. Worker processes
+    # share the OS page cache instead of each holding a full decompressed copy.
     if key not in _tok_mem:
-        with np.load(f"{MKT}/tok_{key[0]}_{key[1]}.npz") as archive:
-            _tok_mem[key] = archive["tokens"]
+        source = f"{MKT}/tok_{key[0]}_{key[1]}.npz"
+        cache_dir = os.path.join(MKT, ".cache_tokens")
+        os.makedirs(cache_dir, exist_ok=True)
+        stem = f"{key[0]}_{key[1]}"
+        cache_path = os.path.join(cache_dir, stem + ".npy")
+        meta_path = cache_path + ".json"
+        stat = os.stat(source)
+        expected = {"source_size": stat.st_size, "source_mtime_ns": stat.st_mtime_ns}
+        valid = False
+        if os.path.isfile(cache_path) and os.path.isfile(meta_path):
+            try:
+                with open(meta_path, encoding="utf-8") as fh:
+                    valid = json.load(fh) == expected
+            except (OSError, ValueError):
+                valid = False
+        if not valid:
+            tmp = cache_path + f".{os.getpid()}.tmp.npy"
+            with np.load(source) as archive:
+                np.save(tmp, archive["tokens"], allow_pickle=False)
+            os.replace(tmp, cache_path)
+            meta_tmp = meta_path + f".{os.getpid()}.tmp"
+            with open(meta_tmp, "w", encoding="utf-8") as fh:
+                json.dump(expected, fh)
+            os.replace(meta_tmp, meta_path)
+        _tok_mem[key] = np.load(cache_path, mmap_mode="r")
     return _tok_mem[key]
 
 
