@@ -333,7 +333,7 @@ def main():
     fingerprint = tokenizer_fingerprint()
     if RESUME and os.path.isfile(os.path.join(CKPT, "resume.pt")):
         state = torch.load(os.path.join(CKPT, "resume.pt"),
-                           map_location=DEVICE, weights_only=False)
+                           map_location="cpu", weights_only=False)
         if state.get("tokenizer_fingerprint") != fingerprint:
             raise RuntimeError("resume checkpoint tokenizer fingerprint mismatch")
         model.load_state_dict(state["model"])
