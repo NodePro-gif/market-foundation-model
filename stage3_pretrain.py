@@ -89,10 +89,14 @@ def sha256_file(path):
 def tokenizer_fingerprint():
     """Bind a checkpoint to the exact tokenizer artifacts used to train it."""
     digest = hashlib.sha256()
-    for name in ("vocab.json", "bpe.npz", "calib.npz", "kmeans.pkl"):
+    for name in ("calib.npz", "kmeans.pkl", "vocab.json", "bpe.npz"):
         path = os.path.join(MKT, name)
         if not os.path.isfile(path):
             raise FileNotFoundError(f"missing tokenizer artifact: {path}")
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\\0")
+        size = os.path.getsize(path)
+        digest.update(size.to_bytes(8, byteorder="big", signed=False))
         with open(path, "rb") as fh:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 digest.update(chunk)
