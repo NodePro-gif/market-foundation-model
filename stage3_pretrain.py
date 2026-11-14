@@ -342,6 +342,8 @@ def main():
         step = int(state["step"])
         best_val = float(state["best_val"])
         hist = state.get("history", [])
+        if state.get("loader_rng") is not None:
+            generator.set_state(state["loader_rng"])
         torch.set_rng_state(state["torch_rng"])
         np.random.set_state(state["numpy_rng"])
         if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
@@ -389,36 +391,38 @@ def main():
                 scaler.update()
                 opt.zero_grad(set_to_none=True)
 
-            if step % 10 == 0:
-                log(f"step {step:>5}  loss {loss.item():.4f}  "
-                    f"ppl {math.exp(min(loss.item(), 20)):8.1f}  lr {lr:.2e}")
-            if step % EVAL_EVERY == 0 and step > 0:
-                vl = evaluate()
-                hist.append(dict(step=step, val_loss=vl, train_loss=loss.item()))
-                log(f"  EVAL step {step}: val_loss={vl:.4f} "
-                    f"ppl={math.exp(min(vl, 20)):.1f}")
-                if vl < best_val:
-                    best_val = vl
-                    atomic_torch_save(model.state_dict(), f"{CKPT}/best.pt")
-                    atomic_json(manifest_path, dict(
-                        tokenizer_fingerprint=fingerprint,
-                        vocab_size=VOCAB, context_length=CTX,
-                        n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
-                        train_years=[2015, 2020], checkpoint_selection_year=2021,
-                        global_step=step, best_validation_loss=vl,
-                    ))
-                    log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
-            step += 1
-            if step % CKPT_EVERY == 0:
-                atomic_torch_save(dict(
-                    model=model.state_dict(), optimizer=opt.state_dict(),
-                    scaler=scaler.state_dict(), step=step, best_val=best_val,
-                    history=hist, tokenizer_fingerprint=fingerprint,
-                    torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
-                    cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
-                ), os.path.join(CKPT, "resume.pt"))
-                atomic_json(LOG, hist)
-                log(f"saved resumable checkpoint at step {step}")
+            if update_now:
+                step += 1
+                if step % 10 == 0:
+                    log(f"step {step:>5}  loss {loss.item():.4f}  "
+                        f"ppl {math.exp(min(loss.item(), 20)):8.1f}  lr {lr:.2e}")
+                if step % EVAL_EVERY == 0:
+                    vl = evaluate()
+                    hist.append(dict(step=step, val_loss=vl, train_loss=loss.item()))
+                    log(f"  EVAL step {step}: val_loss={vl:.4f} "
+                        f"ppl={math.exp(min(vl, 20)):.1f}")
+                    if vl < best_val:
+                        best_val = vl
+                        atomic_torch_save(model.state_dict(), f"{CKPT}/best.pt")
+                        atomic_json(manifest_path, dict(
+                            tokenizer_fingerprint=fingerprint,
+                            vocab_size=VOCAB, context_length=CTX,
+                            n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
+                            train_years=[2015, 2020], checkpoint_selection_year=2021,
+                            global_step=step, best_validation_loss=vl,
+                        ))
+                        log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
+                if step % CKPT_EVERY == 0:
+                    atomic_torch_save(dict(
+                        model=model.state_dict(), optimizer=opt.state_dict(),
+                        scaler=scaler.state_dict(), step=step, best_val=best_val,
+                        history=hist, tokenizer_fingerprint=fingerprint,
+                        torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
+                        loader_rng=generator.get_state(),
+                        cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
+                    ), os.path.join(CKPT, "resume.pt"))
+                    atomic_json(LOG, hist)
+                    log(f"saved resumable checkpoint at step {step}")
 
     atomic_torch_save(model.state_dict(), f"{CKPT}/final.pt")
     atomic_json(LOG, hist)
