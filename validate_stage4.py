@@ -155,18 +155,6 @@ def main():
         f"(val net {pick[1]:+.4%}, n={pick[2]})" if pick
         else "no valid threshold on validation -> using 0.50")
 
-    # ------------------------------------------------------------ test
-    pred = np.load(f"{OUT}/test_pred.npy")
-    y = np.load(f"{OUT}/test_y.npy")
-    test_ds = s4.FinetuneDS(s4.TARGET_SYM, years=[2023],
-                            stride=s4.TEST_STRIDE)
-    bt = np.asarray(test_ds.bars)
-    if len(bt) != len(pred):
-        raise SystemExit(f"window mismatch: rebuilt {len(bt)} vs "
-                         f"test_pred {len(pred)} - rerun with the same "
-                         f"ST4_STRIDE/ST4_TEST_STRIDE env")
-    pc = cal(pred)
-
     # --- pick the holding horizon on VALIDATION too (never on the test set)
     sigv = np.where(pvc >= thr, 1, np.where(pvc <= 1 - thr, -1, 0))
     mv = sigv != 0
@@ -202,6 +190,19 @@ def main():
             print(f"  {h['horizon']:7d} {h['n']:5d} "
                   f"{h['gross_total']*100:+8.2f}% " + " ".join(cells) + mark)
 
+    # ------------------------------------------------------------ locked final test
+    # Do not instantiate or infer on 2023 until calibration, threshold and
+    # holding horizon have all been selected using 2022 only.
+    test_ds = s4.FinetuneDS(s4.TARGET_SYM, years=[2023],
+                            stride=s4.TEST_STRIDE)
+    bt = np.asarray(test_ds.bars)
+    pred, y = predict(test_ds)
+    if len(bt) != len(pred):
+        raise SystemExit(f"window mismatch: rebuilt {len(bt)} vs predicted {len(pred)}")
+    pc = cal(pred)
+    np.save(f"{OUT}/test_pred.npy", pred)
+    np.save(f"{OUT}/test_y.npy", y)
+
     res = dict(
         val_years=list(VAL_YEARS), val_n=int(len(pv)),
         val=dict(acc=float(((pv >= .5) == yv).mean()),
@@ -224,24 +225,21 @@ def main():
         f"of {len(sig)} "
         f"(acc {float(((pred[m] >= .5) == y[m]).mean()):.4f})")
 
-    print(f"  {'k bars':>7} {'n':>5} {'gross':>9} "
-          + " ".join(f"net@{co*1e4:4.1f}bps".rjust(11) for co in COSTS_SIDE))
-    for k in HORIZONS:
-        eligible = m & (bt + k < len(c))
-        sim_by_cost = {co: simulate_non_overlapping(
-            c, bt[eligible], sig[eligible], k, co) for co in COSTS_SIDE}
-        reference = sim_by_cost[COSTS_SIDE[1]]
-        n = reference["trade_count"]
-        gross = reference["gross_compounded"]
-        row = dict(horizon=k, n=n, gross_total=gross, nets={})
-        cells = []
-        for co in COSTS_SIDE:
-            net = sim_by_cost[co]["net_compounded"]
-            row["nets"][f"{co}"] = net
-            cells.append(f"{net*100:+10.2f}%")
-        res["horizons"].append(row)
-        mark = "  <== k dipilih di validasi" if k == k_best else ""
-        print(f"  {k:7d} {n:5d} {gross*100:+8.2f}% " + " ".join(cells) + mark)
+    # Evaluate only the policy already selected on 2022. Never sweep
+    # thresholds or holding horizons on the final test.
+    test_policy = None
+    if k_best is not None:
+        eligible = m & (bt + k_best < len(c))
+        sim = simulate_non_overlapping(c, bt[eligible], sig[eligible],
+                                       k_best, COSTS_SIDE[1])
+        test_policy = dict(horizon=k_best, cost_per_side=COSTS_SIDE[1],
+                           trades=sim["trade_count"],
+                           gross_compounded=sim["gross_compounded"],
+                           net_compounded=sim["net_compounded"],
+                           max_drawdown=sim["max_drawdown"])
+        log(f"locked 2023 policy: horizon={k_best}, trades={sim['trade_count']}, "
+            f"net={sim['net_compounded']:+.3%}, maxDD={sim['max_drawdown']:.3%}")
+    res["test_policy"] = test_policy
 
     with open(f"{OUT}/validation.json", "w") as fh:
         json.dump(res, fh, indent=1)
