@@ -502,17 +502,21 @@ def main():
             )
         if not manifest_ok:
             best_val = float("inf")
-            for stale in (best_path, manifest_path):
-                if os.path.isfile(stale):
-                    os.remove(stale)
-            log("previous best checkpoint/manifest unavailable; will select a new best")
+            if IS_MAIN:
+                for stale in (best_path, manifest_path):
+                    if os.path.isfile(stale):
+                        os.remove(stale)
+                log("previous best checkpoint/manifest unavailable; will select a new best")
+            sync_workers()
         log(f"resumed from step {step}, best_val={best_val:.5f}")
     else:
-        # A fresh run must never leave an older best checkpoint eligible for use.
-        for stale in (os.path.join(CKPT, "best.pt"), manifest_path, resume_path):
-            if os.path.isfile(stale):
-                os.remove(stale)
-        log("starting fresh pretraining run")
+        # Only rank 0 mutates shared checkpoint files.
+        if IS_MAIN:
+            for stale in (os.path.join(CKPT, "best.pt"), manifest_path, resume_path):
+                if os.path.isfile(stale):
+                    os.remove(stale)
+            log("starting fresh pretraining run")
+        sync_workers()
 
     def evaluate():
         model.eval()
