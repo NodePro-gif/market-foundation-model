@@ -6,6 +6,8 @@ The corrected pipeline fits tokenizer bins, regime clusters and BPE merges on no
 
 **Important:** README/PROGRESS metrics were produced by different runs and configurations (including CPU-reduced strides and GPU-oriented defaults). They are not interchangeable. Record the exact configuration when reproducing a result.
 
+The BPE training corpus uses contiguous excerpts from the training period and explicit sequence-boundary sentinels, preventing artificial adjacent pairs between different assets/timeframes. Fine-tuning samples non-held-out assets with equal per-asset probability; checkpoint selection is evaluated on XAUUSD 2021. Pretraining checkpoints include best_manifest.json, which fingerprints both tokenizer files. If the tokenizer is regenerated, discard the old resume.pt and rerun pretraining; fine-tuning rejects mismatched or legacy checkpoints.
+
 ## Reproduction checklist
 
 Record all of the following with each experiment:
