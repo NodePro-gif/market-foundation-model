@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/NodePro-gif/market-foundation-model/actions/workflows/ci.yml/badge.svg)](https://github.com/NodePro-gif/market-foundation-model/actions/workflows/ci.yml)
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NodePro-gif/market-foundation-model/blob/main/notebooks/Market_Foundation_Model_T4.ipynb)
+[![Kaggle GPU notebook](https://img.shields.io/badge/Kaggle-GPU%20Notebook-20BEFF?logo=kaggle&logoColor=white)](notebooks/Market_Foundation_Model_Kaggle_GPU.ipynb)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 
@@ -45,7 +46,7 @@ The existing training entry points remain at the repository root to preserve the
 ```text
 .
 ├── .github/workflows/       # Continuous integration
-├── notebooks/               # Google Colab T4 training notebook
+├── notebooks/               # Google Colab T4 and Kaggle GPU training notebooks
 ├── docs/                    # Project and reproducibility documentation
 ├── ckpt/                    # Generated locally; ignored by Git
 ├── results/                 # Tracked experiment metrics and figures
@@ -70,7 +71,19 @@ See [Project structure](docs/PROJECT_STRUCTURE.md) for the role of supporting sc
 
 For a guided end-to-end run on a **Google Colab T4 GPU**, open [the Colab training notebook](notebooks/Market_Foundation_Model_T4.ipynb). It mounts Google Drive for persistent datasets/checkpoints, downloads the corpus, builds the tokenizer, pretrains, verifies the checkpoint, fine-tunes, calibrates and evaluates the validation-locked policy.
 
-### 1. Environment
+#### Kaggle GPU
+
+Notebook Kaggle tersedia di [`notebooks/Market_Foundation_Model_Kaggle_GPU.ipynb`](notebooks/Market_Foundation_Model_Kaggle_GPU.ipynb). Untuk menggunakannya:
+
+1. Buka Kaggle Notebooks dan buat notebook baru.
+2. Import notebook dari file GitHub tersebut.
+3. Pada Notebook Settings, aktifkan **GPU** dan **Internet**.
+4. Jalankan sel secara berurutan. Notebook memakai `/kaggle/working` untuk data dan checkpoint, tidak menulis ke `/kaggle/input`.
+5. Gunakan **Save Version → Save & Run All** untuk menyimpan output. Untuk resume pada sesi berikutnya, unggah output sebelumnya sebagai Kaggle Dataset, attach sebagai input, lalu isi `INPUT_DATASET_DIR` di sel workspace.
+
+Profil Kaggle awal menggunakan micro-batch 32 dan 2 DataLoader workers untuk kompatibilitas lintas GPU Kaggle; effective batch Stage 3 tetap 64 dan Stage 4 tetap 256. `torch.compile` dinonaktifkan secara default. Profil ini adalah titik awal, bukan klaim benchmark atau jaminan bebas OOM. Kaggle menyediakan jenis GPU dan batas sesi yang dapat berbeda antar-akun/runtime.
+
+## 1. Environment
 
 Python 3.10 or newer is recommended. Create an isolated environment:
 
