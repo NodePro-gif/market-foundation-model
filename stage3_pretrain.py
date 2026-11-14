@@ -486,9 +486,11 @@ def main():
         torch.set_rng_state(state["torch_rng"])
         np.random.set_state(state["numpy_rng"])
         if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
-            torch.cuda.set_rng_state(state["cuda_rng"][LOCAL_RANK])
-            if isinstance(state["cuda_rng"], (list, tuple)) and len(state["cuda_rng"]) > LOCAL_RANK
-            else torch.cuda.set_rng_state_all(state["cuda_rng"]) if RANK == 0 else None
+            cuda_rng = state["cuda_rng"]
+            if isinstance(cuda_rng, (list, tuple)) and len(cuda_rng) > LOCAL_RANK:
+                torch.cuda.set_rng_state(cuda_rng[LOCAL_RANK])
+            elif RANK == 0:
+                torch.cuda.set_rng_state_all(cuda_rng)
         best_path = os.path.join(CKPT, "best.pt")
         manifest_ok = False
         if os.path.isfile(best_path) and os.path.isfile(manifest_path):
