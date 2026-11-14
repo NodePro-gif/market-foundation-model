@@ -1,5 +1,19 @@
 # PROGRESS — log kronologis
 
+## 2026-11-14 — PR #2: training, head architecture, and portfolio hardening
+
+- Fine-tuning optimizer remains AdamW; added linear warmup + cosine decay per optimizer update, gradient clipping, and early stopping based only on XAUUSD 2021 validation AUC.
+- Multi-task prediction heads now use LayerNorm, a 128-unit GELU layer, and dropout. The pretrained GPT backbone tensor shapes are unchanged; a fresh Stage-3 checkpoint remains compatible.
+- Added a sequential one-position-at-a-time portfolio simulator. Signals are ignored while a trade is open and for the next bar after exit; returns compound and transaction costs are applied on both entry and exit.
+- Threshold and horizon selection on 2022 now use the same non-overlapping simulator as the locked 2023 test.
+- Added portfolio regression tests and CI integration. First CI run caught a test expectation about same-bar re-entry; simulator/test were corrected to require a new bar after exit. Local regression run: 4 tests passed.
+- Pull request: https://github.com/NodePro-gif/market-foundation-model/pull/2
+
+**Not yet completed:** a fresh full pipeline run on Colab T4. GitHub CI is not a substitute for GPU training or proof of predictive edge. Do not publish win-rate/profitability claims until the new pipeline has been run and the untouched 2023 results have been reviewed with actual broker costs.
+
+---
+
+
 > **Status protokol (diperbarui 2026-11-14):** catatan eksperimen di bawah ini adalah rekam historis, bukan hasil evaluasi dari pipeline yang sekarang. Kode telah diperketat ke split kronologis: tokenizer/pretraining/fine-tuning dilatih pada 2015–2020; checkpoint pretraining dan supervised dipilih pada 2021; kalibrasi/threshold dipilih pada 2022; 2023 menjadi final test yang tidak disentuh. Statistik tokenizer/BPE hanya di-fit pada aset non-held-out 2015–2020. Karena checkpoint dan angka historis dibuat dengan protokol lama, seluruh artefak harus dibuat ulang sebelum angka performa baru dilaporkan. Jangan mengutip angka backtest lama sebagai bukti performa out-of-sample pada protokol baru.
 
 ## 2026-11-14 — hardening pipeline dan Google Colab T4
