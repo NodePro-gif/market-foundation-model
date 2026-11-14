@@ -86,9 +86,9 @@ class FinetuneDS(Dataset):
     def __init__(self, sym, years, stride=8):
         self.sym = sym
         lab = np.load(f"{MKT}/lab_{sym}.npz")
-        z = np.load(f"{MKT}/tok_{sym}_M5.npz")
-        tok = z["tokens"].astype(np.int64)
-        span = z["spans"].astype(np.int64)
+        tok = s3._tok_cache((sym, "M5"))
+        with np.load(f"{MKT}/tok_{sym}_M5.npz") as z:
+            span = z["spans"].astype(np.int64)
         bar_of_tok = np.concatenate(([0], np.cumsum(span)))[:-1]
         ts = lab["ts"]
         n = min(len(ts), int(bar_of_tok[-1] + span[-1]))
@@ -157,13 +157,9 @@ class FinetuneDS(Dataset):
                 torch.from_numpy(y_q), torch.from_numpy(valid_q))
 
 
-_tokmem = {}
-
-
 def _tokens(sym):
-    if sym not in _tokmem:
-        _tokmem[sym] = np.load(f"{MKT}/tok_{sym}_M5.npz")["tokens"].astype(np.int64)
-    return _tokmem[sym]
+    # Reuse Stage-3's decompressed .npy memory map across DataLoader workers.
+    return s3._tok_cache((sym, "M5"))
 
 
 # ------------------------------------------------------------------ model
@@ -360,6 +356,13 @@ def main():
     log(f"loading pretrained from {ckpt}")
     base = load_base(ckpt)
     model = FinetuneGPT(base).to(DEVICE)
+    compile_enabled = DEVICE.type == "cuda" and os.environ.get("MFM_TORCH_COMPILE", "0") == "1"
+    if compile_enabled and hasattr(model, "compile"):
+        compile_mode = os.environ.get("MFM_COMPILE_MODE", "reduce-overhead")
+        model.compile(mode=compile_mode)
+        log(f"torch.compile enabled (mode={compile_mode}); first iterations include compilation warm-up")
+    elif compile_enabled:
+        log("torch.compile requested but unavailable in this PyTorch build; eager mode retained")
     n_params = sum(p.numel() for p in model.parameters())
     log(f"finetune model params: {n_params/1e6:.2f}M on {DEVICE}; "
         f"batch={BATCH} x accum={ACCUM_STEPS}; AMP={USE_AMP}; workers={NUM_WORKERS}")
