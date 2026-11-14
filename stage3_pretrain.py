@@ -331,7 +331,8 @@ class CausalSelfAttention(nn.Module):
             dropout_p=self.drop.p if self.training else 0.0,
             is_causal=True,
         )
-        return self.drop(y).transpose(1, 2).contiguous().view(B, T, C)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.drop(self.proj(y))
 
 
 class Block(nn.Module):
