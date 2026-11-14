@@ -108,7 +108,10 @@ def best_threshold(p, y, b, c, cost):
 
 def main():
     OUT = s4.OUT
-    # Invalidate prior final-test artifacts before starting a fresh calibration run.
+    final_test_lock = os.path.join(OUT, "FINAL_TEST_2023_ACCESSED.lock")
+    if os.path.exists(final_test_lock) and os.environ.get("MFM_ALLOW_FINAL_TEST_RERUN") != "1":
+        raise SystemExit("2023 final-test lock exists; set MFM_ALLOW_FINAL_TEST_RERUN=1 only for an explicitly authorized rerun")
+    # Invalidate prior validation artifacts before starting a fresh calibration run.
     for stale in ("test_pred.npy", "test_y.npy", "test_pred_cal.npy", "validation.json", "backtest.json"):
         stale_path = os.path.join(OUT, stale)
         if os.path.isfile(stale_path):
@@ -186,6 +189,9 @@ def main():
         f"trades={chosen['trades']}, net={chosen['net'][str(COSTS_SIDE[1])]:+.3%}")
 
     # ------------------------------------------------------------ locked final test
+    # Record access before constructing the 2023 dataset to prevent accidental tuning loops.
+    with open(final_test_lock, "w", encoding="utf-8") as lock:
+        lock.write("2023 final test accessed after 2022 policy selection")
     # Do not instantiate or infer on 2023 until calibration, threshold and
     # holding horizon have all been selected using 2022 only.
     test_ds = s4.FinetuneDS(s4.TARGET_SYM, years=[2023],
