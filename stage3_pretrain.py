@@ -89,7 +89,7 @@ def sha256_file(path):
 def tokenizer_fingerprint():
     """Bind a checkpoint to the exact tokenizer artifacts used to train it."""
     digest = hashlib.sha256()
-    for name in ("vocab.json", "bpe.npz"):
+    for name in ("vocab.json", "bpe.npz", "calib.npz", "kmeans.pkl"):
         path = os.path.join(MKT, name)
         if not os.path.isfile(path):
             raise FileNotFoundError(f"missing tokenizer artifact: {path}")
