@@ -84,3 +84,4 @@ def test_backtest_reuses_saved_final_test_bars_instead_of_rebuilding_2023_datase
     assert _year_2023_finetune_calls(source) == []
     assert 'test_bars.npy' in source
     assert 'FINAL_TEST_2023_ACCESSED.lock' in source
+    assert 'BACKTEST_2023_ACCESSED.lock' in source
