@@ -326,17 +326,11 @@ def run_epoch(model, dl, opt=None, tag=""):
 
 
 def main():
-    ckpt = os.environ.get("CKPT", "/content/ckpt/best.pt")
-    if not os.path.exists(ckpt):
-        # fall back to the repo's ckpt/ (best.pt is committed), then local CKPT dir
-        repo_ck = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ckpt")
-        cands = []
-        for d in (repo_ck, s3.CKPT):
-            if os.path.isdir(d):
-                cands += [os.path.join(d, f) for f in os.listdir(d)
-                          if f.endswith(".pt")]
-        if cands:
-            ckpt = sorted(cands)[-1]
+    ckpt = os.environ.get("CKPT") or os.path.join(s3.CKPT, "best.pt")
+    if not os.path.isfile(ckpt):
+        raise SystemExit(
+            f"pretraining checkpoint not found: {ckpt}; run stage3_pretrain.py first"
+        )
     log(f"loading pretrained from {ckpt}")
     base = load_base(ckpt)
     model = FinetuneGPT(base).to(DEVICE)
@@ -382,7 +376,7 @@ def main():
             f"brier={va['brier']:.4f} ece={va['ece']:.4f}")
         if np.isfinite(va["auc"]) and va["auc"] > best_val_auc:
             best_val_auc = va["auc"]
-            torch.save(model.state_dict(), best_path)
+            s3.atomic_torch_save(model.state_dict(), best_path)
 
     if not os.path.exists(best_path):
         raise SystemExit("no valid checkpoint was selected; validation AUC is undefined")
