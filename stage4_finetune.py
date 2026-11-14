@@ -306,7 +306,9 @@ def run_epoch(model, dl, opt=None, tag=""):
         if not training:
             ts.append((pd.detach().cpu().numpy(),
                        pv.argmax(-1).detach().cpu().numpy(),
-                       pq.detach().cpu().numpy()))
+                       pq.detach().float().cpu().numpy(),
+                       yq.detach().cpu().numpy(),
+                       vq.detach().cpu().numpy()))
     n = max(tot["n"], 1)
     out = dict(loss_dir=tot["dir"] / n, loss_vol=tot["vol"] / n,
                loss_q=tot["q"] / n)
@@ -423,20 +425,26 @@ def main():
         except FileNotFoundError:
             log(f"  {sym}: no data")
 
-    # quantile coverage on test
+    # Quantile coverage: fraction of realized forward returns below each
+    # predicted P10/P50/P90, calculated only after final-test inference.
+    quantile_coverage = None
     if "raw" in te:
-        pq = np.concatenate([t[2] for t in te["raw"]])
-        yq = np.array([float(v) for v in []])
-        log("--- quantile coverage (should be ~10% / 50% / 90%) ---")
-        # need fwd returns aligned; recompute from lab
-        lab = np.load(f"{MKT}/lab_{TARGET_SYM}.npz")
-        log(f"  quantile preds mean P10/P50/P90 per horizon: "
-            f"{np.round(pq.reshape(-1, 3, 3).mean(axis=(0, 2)), 5).tolist()}")
+        pq = np.concatenate([t[2] for t in te["raw"]], axis=0)
+        yq = np.concatenate([t[3] for t in te["raw"]], axis=0)
+        vq = np.concatenate([t[4] for t in te["raw"]], axis=0)
+        covered = (yq[:, :, None] <= pq).astype(np.float64)
+        denom = vq.sum(axis=0)[:, None]
+        numer = (covered * vq[:, :, None]).sum(axis=0)
+        quantile_coverage = np.divide(
+            numer, denom, out=np.full_like(numer, np.nan), where=denom > 0
+        ).tolist()
+        log("quantile coverage by horizon [P10, P50, P90]: "
+            f"{np.round(np.asarray(quantile_coverage), 4).tolist()}")
 
     json.dump(dict(test=dict(acc=te["acc"], auc=te["auc"],
                              brier=te["brier"], ece=te["ece"],
                              n=int(len(te["y"]))),
-                   held_out=held_res,
+                   held_out=held_res, quantile_coverage=quantile_coverage,
                    protocol=dict(train_years=[2015, 2020], checkpoint_selection_year=2021,
                                  calibration_year=2022, final_test_year=2023),
                    config=dict(epochs=EPOCHS, batch=BATCH, accumulation=ACCUM_STEPS,
