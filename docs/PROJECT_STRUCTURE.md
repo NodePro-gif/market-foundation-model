@@ -4,6 +4,8 @@ This document describes the current repository layout. Training scripts intentio
 
 ## Main pipeline
 
+- `notebooks/Market_Foundation_Model_T4.ipynb`: guided Google Colab T4 workflow with Google Drive persistence.
+
 | File | Purpose |
 |---|---|
 | `stage1_corpus.py` | Download and verify the multi-asset corpus in the Colab layout |
