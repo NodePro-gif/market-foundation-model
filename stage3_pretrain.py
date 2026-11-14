@@ -38,7 +38,7 @@ ACCUM_STEPS = max(1, int(os.environ.get("PRETRAIN_ACCUM", "2")))
 LR = float(os.environ.get("PRETRAIN_LR", "3e-4"))
 WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "300"))
 MAX_STEPS = int(os.environ.get("PRETRAIN_STEPS", "6000"))
-CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "500"))
+CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "1000"))
 EVAL_EVERY = int(os.environ.get("PRETRAIN_EVAL_EVERY", "250"))
 NUM_WORKERS = int(os.environ.get("PRETRAIN_WORKERS", "2"))
 RESUME = os.environ.get("PRETRAIN_RESUME", "0") == "1"
