@@ -238,8 +238,8 @@ def main():
 
     with open(f"{OUT}/validation.json", "w") as fh:
         json.dump(res, fh, indent=1)
-    np.save(f"{OUT}/val_pred.npy", pv)
-    np.save(f"{OUT}/val_pred_cal.npy", pvc)
+    np.save(f"{OUT}/val_pred.npy", p_all)
+    np.save(f"{OUT}/val_pred_cal.npy", cal(p_all))
     np.save(f"{OUT}/test_pred_cal.npy", pc)
     log(f"wrote {OUT}/validation.json")
     print("VALIDATE DONE", flush=True)
