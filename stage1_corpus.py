@@ -12,7 +12,7 @@ import urllib.request
 BASE = "https://evtradelabs.com/api/simulator/data"
 LOCAL_DATA_ROOT = os.environ.get(
     "MFM_DATA_ROOT",
-    r"D:\\xauusd-dl" if os.name == "nt"
+    r"D:\xauusd-dl" if os.name == "nt"
     else os.path.join(os.path.expanduser("~"), "market-foundation-model-data"),
 )
 ROOT = os.environ.get(
