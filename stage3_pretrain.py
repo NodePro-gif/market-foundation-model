@@ -18,6 +18,9 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from training_utils import PlateauScale, perplexity_from_loss, warmup_cosine_lr
 from torch.utils.data import DataLoader, Dataset
 
@@ -54,9 +57,20 @@ N_HEAD = 8
 N_EMBD = 384              # 6 * 384^2 * 12 ~= 10.6M + heads/embeds ~= 12M
 DROPOUT = 0.1
 
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
+RANK = int(os.environ.get("RANK", "0"))
+LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
+DISTRIBUTED = WORLD_SIZE > 1
+if DISTRIBUTED:
+    if not torch.cuda.is_available():
+        raise RuntimeError("DDP requires CUDA on every worker")
+    torch.cuda.set_device(LOCAL_RANK)
+    dist.init_process_group(backend="nccl", init_method="env://")
+IS_MAIN = RANK == 0
+
+torch.manual_seed(SEED + RANK)
+np.random.seed(SEED + RANK)
+DEVICE = torch.device(f"cuda:{LOCAL_RANK}" if torch.cuda.is_available() else "cpu")
 if DEVICE.type == "cuda":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
@@ -67,7 +81,15 @@ t0 = time.time()
 
 
 def log(m):
-    print(f"[{time.time()-t0:7.1f}s] {m}", flush=True)
+    if IS_MAIN:
+        print(f"[{time.time()-t0:7.1f}s] {m}", flush=True)
+
+def sync_workers():
+    if DISTRIBUTED:
+        dist.barrier()
+
+def unwrap_model(net):
+    return net.module if isinstance(net, DDP) else net
 
 
 vocab = json.load(open(f"{MKT}/vocab.json"))
@@ -373,6 +395,9 @@ def main():
         log("torch.compile unavailable in this PyTorch build; using eager execution")
     if DEVICE.type == "cuda":
         torch.cuda.reset_peak_memory_stats(DEVICE)
+    if DISTRIBUTED:
+        model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK,
+                    broadcast_buffers=False)
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
     if DEVICE.type == "cuda":
@@ -397,10 +422,18 @@ def main():
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
     generator = torch.Generator().manual_seed(SEED)
-    train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
-                          drop_last=False, generator=generator, **loader_kwargs)
-    val_dl = DataLoader(val_ds, batch_size=BATCH, shuffle=False,
-                        drop_last=False, **loader_kwargs)
+    train_sampler = DistributedSampler(
+        train_ds, num_replicas=WORLD_SIZE, rank=RANK, shuffle=True,
+        seed=SEED, drop_last=False) if DISTRIBUTED else None
+    val_sampler = DistributedSampler(
+        val_ds, num_replicas=WORLD_SIZE, rank=RANK, shuffle=False,
+        drop_last=False) if DISTRIBUTED else None
+    train_dl = DataLoader(
+        train_ds, batch_size=BATCH, shuffle=train_sampler is None,
+        sampler=train_sampler, drop_last=False, generator=generator, **loader_kwargs)
+    val_dl = DataLoader(
+        val_ds, batch_size=BATCH, shuffle=False, sampler=val_sampler,
+        drop_last=False, **loader_kwargs)
     if len(train_dl) == 0 or len(val_dl) == 0:
         raise SystemExit("train/validation loader is empty; reduce batch size or check data")
 
@@ -435,7 +468,7 @@ def main():
         state = torch.load(resume_path, map_location="cpu", weights_only=False)
         if state.get("tokenizer_fingerprint") != fingerprint:
             raise RuntimeError("resume checkpoint tokenizer fingerprint mismatch")
-        model.load_state_dict(state["model"])
+        unwrap_model(model).load_state_dict(state["model"])
         opt.load_state_dict(state["optimizer"])
         scaler.load_state_dict(state["scaler"])
         step = int(state["step"])
@@ -452,7 +485,7 @@ def main():
         torch.set_rng_state(state["torch_rng"])
         np.random.set_state(state["numpy_rng"])
         if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
-            torch.cuda.set_rng_state_all(state["cuda_rng"])
+            torch.cuda.set_rng_state_all(state["cuda_rng"]) if RANK == 0 else None
         best_path = os.path.join(CKPT, "best.pt")
         manifest_ok = False
         if os.path.isfile(best_path) and os.path.isfile(manifest_path):
@@ -491,13 +524,20 @@ def main():
         model.train()
         if n == 0:
             raise RuntimeError("validation produced zero non-padding targets")
+        if DISTRIBUTED:
+            totals = torch.tensor([tot, n], dtype=torch.float64, device=DEVICE)
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+            tot, n = totals.tolist()
         return tot / n
 
     model.train()
     opt.zero_grad(set_to_none=True)
     perf_t0 = time.time()
     perf_windows = 0
+    epoch = 0
     while step < MAX_STEPS:
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         for i, batch in enumerate(train_dl):
             if step >= MAX_STEPS:
                 break
@@ -545,34 +585,45 @@ def main():
                             f"{old_scale:.3f} -> {new_scale:.3f}")
                     if vl < best_val:
                         best_val = vl
-                        atomic_torch_save(model.state_dict(), f"{CKPT}/best.pt")
-                        atomic_json(manifest_path, dict(
-                            tokenizer_fingerprint=fingerprint,
-                            vocab_size=VOCAB, context_length=CTX,
-                            n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
-                            train_years=[2015, 2020], checkpoint_selection_year=2021,
-                            global_step=step, best_validation_loss=vl,
-                            checkpoint_sha256=sha256_file(os.path.join(CKPT, "best.pt")),
-                        ))
-                        log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
+                        if IS_MAIN:
+                            atomic_torch_save(unwrap_model(model).state_dict(), f"{CKPT}/best.pt")
+                            atomic_json(manifest_path, dict(
+                                tokenizer_fingerprint=fingerprint,
+                                vocab_size=VOCAB, context_length=CTX,
+                                n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
+                                train_years=[2015, 2020], checkpoint_selection_year=2021,
+                                global_step=step, best_validation_loss=vl,
+                                checkpoint_sha256=sha256_file(os.path.join(CKPT, "best.pt")),
+                            ))
+                            log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
+                        sync_workers()
                 if step % CKPT_EVERY == 0:
-                    atomic_torch_save(dict(
-                        model=model.state_dict(), optimizer=opt.state_dict(),
-                        scaler=scaler.state_dict(), step=step, best_val=best_val,
-                        lr_controller=lr_controller.state_dict(),
-                        history=hist, tokenizer_fingerprint=fingerprint,
-                        torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
-                        loader_rng=generator.get_state(),
-                        cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
-                    ), os.path.join(CKPT, "resume.pt"))
-                    atomic_json(LOG, hist)
-                    log(f"saved resumable checkpoint at step {step}")
+                    if IS_MAIN:
+                        atomic_torch_save(dict(
+                            model=unwrap_model(model).state_dict(), optimizer=opt.state_dict(),
+                            scaler=scaler.state_dict(), step=step, best_val=best_val,
+                            lr_controller=lr_controller.state_dict(),
+                            history=hist, tokenizer_fingerprint=fingerprint,
+                            torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
+                            loader_rng=generator.get_state(),
+                            cuda_rng=torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None,
+                        ), os.path.join(CKPT, "resume.pt"))
+                        atomic_json(LOG, hist)
+                        log(f"saved resumable checkpoint at step {step}")
+                    sync_workers()
 
-    atomic_torch_save(model.state_dict(), f"{CKPT}/final.pt")
-    atomic_json(LOG, hist)
-    log(f"DONE best_val={best_val:.4f} best_ppl={perplexity_from_loss(best_val):.4f} "
-        f"params={n_params/1e6:.2f}M batch={BATCH} accum={ACCUM_STEPS}")
-    print("STAGE3 DONE", flush=True)
+        epoch += 1
+
+    if IS_MAIN:
+        atomic_torch_save(unwrap_model(model).state_dict(), f"{CKPT}/final.pt")
+        atomic_json(LOG, hist)
+        log(f"DONE best_val={best_val:.4f} best_ppl={perplexity_from_loss(best_val):.4f} "
+            f"params={n_params/1e6:.2f}M batch={BATCH} accum={ACCUM_STEPS} "
+            f"world_size={WORLD_SIZE}")
+        print("STAGE3 DONE", flush=True)
+    sync_workers()
+    if DISTRIBUTED:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
