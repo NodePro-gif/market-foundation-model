@@ -24,8 +24,7 @@ def log(m):
 
 
 def main():
-    ckpt = os.environ.get("CKPT") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "ckpt", "best.pt")
+    ckpt = os.environ.get("CKPT") or os.path.join(s3.CKPT, "best.pt")
     log(f"loading {ckpt}")
     manifest_path = os.path.join(os.path.dirname(os.path.abspath(ckpt)),
                                  "best_manifest.json")
