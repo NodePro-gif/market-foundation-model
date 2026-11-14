@@ -1,5 +1,10 @@
 #!/usr/bin/env python
-"""Walk-forward evaluation of the stage-4 direction head.
+"""LEGACY exploratory walk-forward evaluation of the stage-4 direction head.
+
+Its folds overlap the former fine-tuning training period. The historical output
+is retained for auditability but is not a valid headline benchmark for the
+corrected fixed chronology (train 2015-2020, select 2021, calibrate 2022,
+test 2023). Do not use it to claim current out-of-sample performance.
 
 The single 2023 result rests on only 87 bets. This runs three honest folds:
 

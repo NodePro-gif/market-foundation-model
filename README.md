@@ -130,6 +130,8 @@ $env:ST4_HELD_STRIDE="128"
 python -u stage4_finetune.py
 ```
 
+The corrected chronology is: tokenizer fitting and model training on 2015–2020, pretraining/supervised checkpoint selection on 2021–2022/2021 respectively, calibration on 2022, and final test on 2023. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; the committed checkpoint and historical metrics use the previous protocol.
+
 For a full reproduction, follow [Reproducibility and data protocol](docs/REPRODUCIBILITY.md) and the experiment notes in [PROGRESS.md](PROGRESS.md). Do not compare runs unless their data split, stride, seed, model checkpoint and cost assumptions match.
 
 ## Research snapshot

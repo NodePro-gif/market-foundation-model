@@ -2,9 +2,7 @@
 
 ## Data and chronology
 
-The current repository scripts and experiment notes describe a historical multi-asset corpus spanning 2015 onward. The fine-tuning code now trains on 2015–2020, selects a checkpoint on 2021–2022, and reserves 2023 for the final test. The earlier committed checkpoint and metrics were produced under a different protocol and must not be presented as results from this corrected split.
-
-The current fine-tuning workflow uses 2021–2022 for epoch/checkpoint selection and 2023 for final evaluation. The calibration script also uses 2021–2022, so its calibration/threshold estimates share the checkpoint-selection period; this is useful for exploration but is not a fully independent calibration set. A stricter next iteration should reserve a distinct calibration period or use nested chronological validation. The existing walk-forward script was designed for earlier training artifacts; do not treat its historical aggregate as an independent benchmark for the newly corrected split.
+The corrected pipeline fits tokenizer bins, regime clusters and BPE merges on 2015–2020 only; pretrains on 2015–2020 and selects the language-model checkpoint on 2021–2022; fine-tunes on 2015–2020 and selects the supervised checkpoint on 2021; reserves 2022 for calibration/threshold selection; and keeps 2023 as the final test. Earlier committed checkpoints and metrics were produced under a different protocol and must not be presented as results from this corrected split.
 
 **Important:** README/PROGRESS metrics were produced by different runs and configurations (including CPU-reduced strides and GPU-oriented defaults). They are not interchangeable. Record the exact configuration when reproducing a result.
 
@@ -32,11 +30,10 @@ python verify_ckpt.py
 python stage3_pretrain.py
 python stage4_finetune.py
 python validate_stage4.py
-python walkforward_stage4.py
 python backtest_stage4.py
 ```
 
-Some scripts expect artifacts in a specific local or Colab directory. Prepare those paths before running the sequence; see the script constants and setup instructions in the README. The current committed pretrained checkpoint was created with the previous pretraining/tokenizer protocol. For a fully reproducible corrected experiment, regenerate tokenizer artifacts and pretraining checkpoints under a documented chronological split before interpreting new fine-tuning metrics.
+Some scripts expect artifacts in a specific local or Colab directory. Prepare those paths before running the sequence; see the script constants and setup instructions in the README. The current committed pretrained checkpoint was created with the previous pretraining/tokenizer protocol. Regenerate tokenizer artifacts and pretraining checkpoints under the corrected chronology before interpreting new fine-tuning metrics. The legacy walk-forward output is retained for auditability, not as a current clean benchmark.
 
 ## Evaluation safeguards
 

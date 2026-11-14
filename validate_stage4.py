@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader
 
 import stage4_finetune as s4
 
-VAL_YEARS = (2021, 2022)
+VAL_YEARS = (2022,)  # reserved for calibration/threshold selection
 HORIZONS = (1, 3, 6, 12, 24, 48)          # bars held (must be <= stride grid)
 # 0.5 / 1.5 / 3.0 bps PER SIDE (1 bps = 1e-4); round trip = 2 sides
 COSTS_SIDE = (0.00005, 0.00015, 0.00030)

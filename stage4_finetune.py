@@ -75,7 +75,8 @@ class FinetuneDS(Dataset):
         bar_of_tok = np.concatenate(([0], np.cumsum(span)))[:-1]
         ts = lab["ts"]
         n = min(len(ts), int(bar_of_tok[-1]) + 1)
-        years_arr = (ts[:n] // 31557600 + 1970).astype(np.int32)
+        years_arr = (ts[:n].astype(np.int64).astype("datetime64[s]")
+                     .astype("datetime64[Y]").astype(np.int32) + 1970)
         # token index whose bar == b  (first token starting at bar b)
         tok_of_bar = np.full(n, -1, np.int64)
         tok_of_bar[bar_of_tok] = np.arange(len(bar_of_tok))
@@ -305,7 +306,7 @@ def main():
     # The validation period selects the checkpoint; the test period is read once
     # after training has finished.
     train_ds = FinetuneDS(TARGET_SYM, years=range(2015, 2021), stride=STRIDE)
-    val_ds = FinetuneDS(TARGET_SYM, years=range(2021, 2023), stride=TEST_STRIDE)
+    val_ds = FinetuneDS(TARGET_SYM, years=[2021], stride=TEST_STRIDE)
     test_ds = FinetuneDS(TARGET_SYM, years=[2023], stride=TEST_STRIDE)
     if not len(train_ds) or not len(val_ds) or not len(test_ds):
         raise SystemExit(

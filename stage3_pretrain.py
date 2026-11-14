@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader, Dataset
 IS_COLAB = os.path.isdir("/content")
 MKT = "/content/mkt" if IS_COLAB else r"D:\xauusd-dl\mkt"
 CKPT = "/content/ckpt" if IS_COLAB else r"D:\xauusd-dl\ckpt"
-LOG = "/content/pretrain_log.json"
+LOG = os.path.join(CKPT, "pretrain_log.json")
 
 # ------------------------------------------------------------------ config
 CTX = 512
@@ -59,6 +59,12 @@ SESS0 = vocab["SESS0"]
 SYMBOLS = vocab["symbols"]
 HELD_OUT = set(vocab["held_out"])
 TF_LIST = vocab["tf_list"]
+
+
+def years_from_ts(ts):
+    """Convert Unix-second timestamps to exact UTC calendar years."""
+    return (np.asarray(ts, dtype=np.int64).astype("datetime64[s]")
+            .astype("datetime64[Y]").astype(np.int32) + 1970)
 SYM_ID = {s: i for i, s in enumerate(SYMBOLS)}
 TF_ID = {t: i for i, t in enumerate(TF_LIST)}
 
@@ -109,7 +115,7 @@ class MarketLMSmart(Dataset):
                 if lab is not None and tf == "M5":
                     ts = lab["ts"]
                     n = min(len(ts), int(bar_of_tok[-1]) + 1)
-                    years = (ts[:n] // 31557600 + 1970).astype(np.int32)
+                    years = years_from_ts(ts[:n])
                     regime = lab["regime"][:n]
                     sess = lab["sess"][:n]
                     tok = tok[:int(np.searchsorted(bar_of_tok, n, "right"))]
@@ -129,16 +135,19 @@ class MarketLMSmart(Dataset):
                     # M1 (and any series without labels): filter by token-year
                     # map if available, else include everything
                     ymap_p = f"{MKT}/year_{sym}_{tf}.npy"
-                    if os.path.exists(ymap_p):
-                        ymap = np.load(ymap_p)
-                        m = min(len(ymap), len(tok))
-                        ok = np.isin(ymap[:m], list(years_set))
-                        offs = np.flatnonzero(ok)[:: self.stride]
-                        for off in offs:
-                            self.items.append((sym, tf, int(off), None, None))
-                    else:
-                        for off in range(0, max(len(tok) - 5, 1), self.stride):
-                            self.items.append((sym, tf, off, None, None))
+                    if not os.path.exists(ymap_p):
+                        log(f"skip {sym}/{tf}: missing token-year map {ymap_p}")
+                        continue
+                    ymap = np.load(ymap_p)
+                    m = min(len(ymap), len(tok))
+                    if m <= CTX - 5:
+                        continue
+                    end_idx = np.minimum(np.arange(m) + CTX - 6, m - 1)
+                    ok = (np.isin(ymap[:m], list(years_set)) &
+                          np.isin(ymap[end_idx], list(years_set)))
+                    offs = np.flatnonzero(ok)[:: self.stride]
+                    for off in offs:
+                        self.items.append((sym, tf, int(off), None, None))
         log(f"MarketLMSmart {min(years_set)}-{max(years_set)}: "
             f"{len(self.items):,} windows")
 
@@ -245,11 +254,15 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
 
-    # 2023 held out of pretraining (year filter), held-out symbols excluded
-    train_ds = MarketLMSmart(split_years=list(range(2015, 2023)))
-    val_ds = MarketLMSmart(split_years=[2023])
-    if len(train_ds) == 0:
-        raise SystemExit("empty train dataset - check MKT files")
+    # Fit on 2015-2020, select the language-model checkpoint on 2021-2022.
+    # 2023 remains untouched by tokenizer fitting and pretraining.
+    train_ds = MarketLMSmart(split_years=list(range(2015, 2021)))
+    val_ds = MarketLMSmart(split_years=[2021, 2022])
+    if len(train_ds) == 0 or len(val_ds) == 0:
+        raise SystemExit(
+            f"empty pretraining dataset: train={len(train_ds)} val={len(val_ds)}; "
+            "check MKT files and token-year maps"
+        )
 
     train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
                           num_workers=0, drop_last=True, pin_memory=True)
@@ -266,7 +279,7 @@ def main():
         p = (step - WARMUP) / max(total_steps - WARMUP, 1)
         return 0.1 * LR + 0.45 * LR * (1 + math.cos(math.pi * p))
 
-    scaler = torch.amp.GradScaler("cuda", enabled=DEVICE.type == "cuda")
+    scaler = torch.cuda.amp.GradScaler(enabled=DEVICE.type == "cuda")
     step = 0
     best_val = float("inf")
     hist = []

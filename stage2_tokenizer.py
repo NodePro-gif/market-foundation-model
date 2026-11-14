@@ -33,6 +33,7 @@ REG0 = TF0 + 2                          # 6 regimes
 SESS0 = REG0 + 6                        # 4 sessions
 
 YEARS = list(range(2015, 2024))
+TRAIN_END_YEAR = 2020  # fit tokenizer statistics and BPE on train period only
 HELD_OUT = ["NIKKEI", "BRENT", "EURGBP"]
 
 SYMBOLS = [
@@ -41,6 +42,13 @@ SYMBOLS = [
     "FTSE", "NIKKEI", "BRENT", "WTI",
 ]
 TF_LIST = ["M5", "M1"]
+
+
+def years_from_ts(ts):
+    """Convert Unix-second timestamps to exact UTC calendar years."""
+    return (np.asarray(ts, dtype=np.int64).astype("datetime64[s]")
+            .astype("datetime64[Y]").astype(np.int32) + 1970)
+
 
 t0 = time.time()
 os.makedirs(NPZ, exist_ok=True)
@@ -155,20 +163,23 @@ def iter_series():
 
 
 def step_b():
-    log("STEP B - calibrating bins + regime clusters")
+    log(f"STEP B - fitting bins/regimes on {YEARS[0]}-{TRAIN_END_YEAR} only")
     A, P, R, D = [], [], [], []
     FR, AT, RG, PR = [], [], [], []
     vsample = []
     for sym, tf, z in iter_series():
         a, p, r, d, ret, atr, rng = indicators(z["ts"], z["o"], z["h"], z["l"], z["c"], z["v"])
-        sl = slice(None, None, 7)
+        train_mask = years_from_ts(z["ts"]) <= TRAIN_END_YEAR
+        if not train_mask.any():
+            continue
         for arr, acc in ((a, A), (p, P), (r, R), (d, D)):
-            s = arr[sl]
+            s = arr[train_mask][::7]
             s = s[np.isfinite(s)]
-            acc.append(s[:80000])
+            if len(s):
+                acc.append(s[:80000])
         if tf == "M5":
             rf = regime_features(ret, atr, rng, z["c"])
-            FR.append(rf[sl][::3])
+            FR.append(rf[train_mask][::7][::3])
             # realised volatility of next 12 bars (label calibration)
             rr = np.concatenate(([0.0], np.log(z["c"][1:] / z["c"][:-1])))
             cs = np.concatenate(([0.0], np.cumsum(rr ** 2)))
@@ -177,8 +188,10 @@ def step_b():
             # rv[i] = std of returns rr[i+1..i+k] = cs[i+k+1]-cs[i+1]
             rv[: len(rr) - k] = np.sqrt(
                 np.maximum(cs[k + 1:len(rr) + 1] - cs[1:len(rr) - k + 1], 0) / k)
-            v = rv[sl]
-            vsample.append(v[np.isfinite(v)][:80000])
+            v = rv[train_mask][::7]
+            v = v[np.isfinite(v)]
+            if len(v):
+                vsample.append(v[:80000])
 
     pool_a = np.concatenate(A)
     pool_p = np.concatenate(P)
@@ -323,7 +336,7 @@ def step_c():
                                ts=z["ts"], c=z["c"], h=z["h"], l=z["l"], v=z["v"])
         log(f"  indicators {sym}/{tf}: {len(a):,}")
 
-    # --- BPE training sample ---------------------------------------------
+    # --- BPE training sample: fit vocabulary on train years only ---------
     chunks = []
     for key in sorted(raws):
         rr = raws[key]
@@ -333,7 +346,11 @@ def step_c():
         d8 = bin4(rr["d"], edges["d"]).astype(np.int64)
         ch = a8 * 64 + p8 * 16 + r8 * 4 + d8
         raws[key]["ch"] = ch
-        chunks.append(ch[:: max(1, len(ch) // 120000)][:120000])
+        train_ch = ch[years_from_ts(rr["ts"]) <= TRAIN_END_YEAR]
+        if len(train_ch):
+            chunks.append(train_ch[:: max(1, len(train_ch) // 120000)][:120000])
+    if not chunks:
+        raise RuntimeError("no training-period bars available for BPE fitting")
     sample = np.concatenate(chunks)
     merge_arr, new_ids = train_bpe(sample)
 
@@ -345,6 +362,9 @@ def step_c():
         ch = rr["ch"].astype(np.int64)
         enc, spans = bpe_encode(ch, merge_arr, new_ids)
         np.savez_compressed(f"{OUT}/tok_{sym}_{tf}.npz", tokens=enc, spans=spans)
+        bar_of_tok = np.concatenate(([0], np.cumsum(spans.astype(np.int64))))[:-1]
+        token_years = years_from_ts(rr["ts"])[bar_of_tok]
+        np.save(f"{OUT}/year_{sym}_{tf}.npy", token_years.astype(np.int16))
         summary.append((sym, tf, len(ch), len(enc), round(len(ch) / max(len(enc), 1), 3)))
         log(f"  encoded {sym}/{tf}: {len(ch):,} bars -> {len(enc):,} tokens "
             f"(compression {len(ch)/max(len(enc),1):.2f}x)")
