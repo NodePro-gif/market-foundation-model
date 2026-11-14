@@ -77,34 +77,34 @@ class FinetuneDS(Dataset):
         n = min(len(ts), int(bar_of_tok[-1]) + 1)
         years_arr = (ts[:n].astype(np.int64).astype("datetime64[s]")
                      .astype("datetime64[Y]").astype(np.int32) + 1970)
-        # token index whose bar == b  (first token starting at bar b)
-        tok_of_bar = np.full(n, -1, np.int64)
-        tok_of_bar[bar_of_tok] = np.arange(len(bar_of_tok))
-        # forward-fill for bars inside a multi-bar token
-        idx = np.maximum.accumulate(np.where(tok_of_bar >= 0,
-                                             np.arange(n), 0))
-        inside = tok_of_bar >= 0
-        tok_of_bar = np.where(inside, tok_of_bar, idx)
-
+        # A BPE token is observable only after every bar it covers has closed.
+        # Align each prediction to token END bars; never use a token that contains
+        # bars occurring after the prediction timestamp.
+        token_end_bars = bar_of_tok + span - 1
+        valid_tokens = token_end_bars < n
+        token_ids = np.flatnonzero(valid_tokens)
+        token_bars = token_end_bars[valid_tokens]
         requested_years = list(years)
-        want = np.isin(years_arr, requested_years)
+        token_years = years_arr[token_bars]
+        want = np.isin(token_years, requested_years)
+
         # Purge samples whose longest target (288 bars) crosses the split.
-        future_idx = np.minimum(np.arange(n) + 288, n - 1)
+        future_idx = np.minimum(token_bars + 288, n - 1)
         want &= np.isin(years_arr[future_idx], requested_years)
-        # window must fit: CTX-5 content tokens after the 5-token prefix
-        end_tok = tok_of_bar[:n]
-        ok = want & (end_tok >= s3.CTX - 6) & (end_tok < len(tok) - 1)
-        # labels must be valid (255 = missing sentinel)
-        ok &= (lab["nxt"][:n] < 2) & (lab["volb"][:n] < 4) & \
-              (lab["regime"][:n] < 6)
-        offs = np.flatnonzero(ok)[::stride]
-        # align: last content token = end_tok[b]
-        self.ends = end_tok[offs]
-        self.starts = self.ends - (s3.CTX - 6)   # chunk len = CTX-5
-        self.bars = offs
+        # Need 507 content tokens after the five context tokens.
+        want &= token_ids >= s3.CTX - 6
+        want &= token_ids < len(tok) - 1
+        # Labels must be valid at the token's final completed bar.
+        want &= (lab["nxt"][token_bars] < 2) & (lab["volb"][token_bars] < 4) & \
+                (lab["regime"][token_bars] < 6)
+
+        offs = token_ids[want][::stride]
+        self.ends = offs
+        self.starts = offs - (s3.CTX - 6)   # exactly CTX-5 content tokens
+        self.bars = token_end_bars[offs]
         self.lab = lab
         self.n = n
-        log(f"FinetuneDS {sym} years={sorted(set(years_arr[offs].tolist()))} "
+        log(f"FinetuneDS {sym} years={sorted(set(years_arr[self.bars].tolist()))} "
             f"windows={len(self.bars):,}")
 
     def __len__(self):

@@ -131,9 +131,10 @@ class MarketLMSmart(Dataset):
                          np.isin(y1, list(years_set))
                     offs = np.flatnonzero(ok)[:: self.stride]
                     for off in offs:
+                        context_end_bar = int(last_bar[off])
                         self.items.append((sym, tf, int(off),
-                                           int(regime[bar_of_tok[off]]),
-                                           int(sess[bar_of_tok[off]])))
+                                           int(regime[context_end_bar]),
+                                           int(sess[context_end_bar])))
                 else:
                     # M1 (and any series without labels): filter by token-year
                     # map if available, else include everything
