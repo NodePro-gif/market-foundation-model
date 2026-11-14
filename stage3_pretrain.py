@@ -33,14 +33,15 @@ LOG = os.path.join(CKPT, "pretrain_log.json")
 
 # ------------------------------------------------------------------ config
 CTX = 512
-BATCH = int(os.environ.get("PRETRAIN_BATCH", "32"))
-ACCUM_STEPS = max(1, int(os.environ.get("PRETRAIN_ACCUM", "2")))
+BATCH = int(os.environ.get("PRETRAIN_BATCH", "64"))
+ACCUM_STEPS = max(1, int(os.environ.get("PRETRAIN_ACCUM", "1")))
 LR = float(os.environ.get("PRETRAIN_LR", "3e-4"))
 WARMUP = int(os.environ.get("PRETRAIN_WARMUP", "300"))
 MAX_STEPS = int(os.environ.get("PRETRAIN_STEPS", "6000"))
 CKPT_EVERY = int(os.environ.get("PRETRAIN_CKPT_EVERY", "1000"))
 EVAL_EVERY = int(os.environ.get("PRETRAIN_EVAL_EVERY", "250"))
-NUM_WORKERS = int(os.environ.get("PRETRAIN_WORKERS", "2"))
+NUM_WORKERS = int(os.environ.get("PRETRAIN_WORKERS", "4"))
+PREFETCH_FACTOR = max(2, int(os.environ.get("PRETRAIN_PREFETCH", "4")))
 RESUME = os.environ.get("PRETRAIN_RESUME", "0") == "1"
 SEED = int(os.environ.get("PRETRAIN_SEED", "42"))
 N_LAYER = 6
@@ -51,6 +52,12 @@ DROPOUT = 0.1
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if DEVICE.type == "cuda":
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+# Avoid CPU thread oversubscription when DataLoader workers are active.
+torch.set_num_threads(max(1, int(os.environ.get("MFM_CPU_THREADS", "4"))))
 t0 = time.time()
 
 
@@ -123,8 +130,14 @@ _tok_mem = {}
 
 
 def _tok_cache(key):
+    # Materialize compressed NPZ members exactly once per worker process.
+    # Accessing NpzFile["tokens"] for every sample repeatedly decompresses it.
     if key not in _tok_mem:
-        _tok_mem[key] = np.load(f"{MKT}/tok_{key[0]}_{key[1]}.npz")
+        with np.load(f"{MKT}/tok_{key[0]}_{key[1]}.npz") as archive:
+            _tok_mem[key] = {
+                "tokens": archive["tokens"],
+                "spans": archive["spans"],
+            }
     return _tok_mem[key]
 
 
@@ -315,6 +328,11 @@ def main():
     model = MarketGPT().to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
+    if DEVICE.type == "cuda":
+        props = torch.cuda.get_device_properties(DEVICE)
+        log(f"GPU={props.name} VRAM={props.total_memory / 1024**3:.1f}GiB "
+            f"AMP=FP16 batch={BATCH} accum={ACCUM_STEPS} "
+            f"effective_batch={BATCH * ACCUM_STEPS}")
 
     # Fit on 2015-2020 and select the language-model checkpoint on 2021.
     # 2022 is reserved for calibration; 2023 remains the final untouched test.
@@ -330,6 +348,7 @@ def main():
                          pin_memory=DEVICE.type == "cuda")
     if NUM_WORKERS > 0:
         loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = PREFETCH_FACTOR
     generator = torch.Generator().manual_seed(SEED)
     train_dl = DataLoader(train_ds, batch_size=BATCH, shuffle=True,
                           drop_last=False, generator=generator, **loader_kwargs)
@@ -338,8 +357,13 @@ def main():
     if len(train_dl) == 0 or len(val_dl) == 0:
         raise SystemExit("train/validation loader is empty; reduce batch size or check data")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=LR,
-                            betas=(0.9, 0.95), weight_decay=0.1)
+    try:
+        opt = torch.optim.AdamW(model.parameters(), lr=LR,
+                                betas=(0.9, 0.95), weight_decay=0.1,
+                                fused=DEVICE.type == "cuda")
+    except TypeError:  # older PyTorch builds
+        opt = torch.optim.AdamW(model.parameters(), lr=LR,
+                                betas=(0.9, 0.95), weight_decay=0.1)
     total_steps = MAX_STEPS
 
     def lr_at(step):
