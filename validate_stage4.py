@@ -107,6 +107,11 @@ def best_threshold(p, y, b, c, cost):
 
 def main():
     OUT = s4.OUT
+    # Invalidate prior final-test artifacts before starting a fresh calibration run.
+    for stale in ("test_pred.npy", "test_y.npy", "test_pred_cal.npy", "validation.json", "backtest.json"):
+        stale_path = os.path.join(OUT, stale)
+        if os.path.isfile(stale_path):
+            os.remove(stale_path)
     # ---------------------------------------------------------- validation
     log(f"validation years {VAL_YEARS}")
     val_ds = s4.FinetuneDS(s4.TARGET_SYM, years=VAL_YEARS,
