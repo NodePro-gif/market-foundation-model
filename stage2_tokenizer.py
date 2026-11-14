@@ -16,9 +16,17 @@ import time
 import numpy as np
 
 IS_COLAB = os.path.isdir("/content")
-ROOT = "/content/corpus" if IS_COLAB else r"D:\xauusd-dl\corpus"
-NPZ = "/content/npz" if IS_COLAB else r"D:\xauusd-dl\npz"
-OUT = "/content/mkt" if IS_COLAB else r"D:\xauusd-dl\mkt"
+LOCAL_DATA_ROOT = os.environ.get(
+    "MFM_DATA_ROOT",
+    r"D:\xauusd-dl" if os.name == "nt"
+    else os.path.join(os.path.expanduser("~"), "market-foundation-model-data"),
+)
+ROOT = os.environ.get("MFM_CORPUS_DIR",
+                      "/content/corpus" if IS_COLAB else os.path.join(LOCAL_DATA_ROOT, "corpus"))
+NPZ = os.environ.get("MFM_NPZ_DIR",
+                     "/content/npz" if IS_COLAB else os.path.join(LOCAL_DATA_ROOT, "npz"))
+OUT = os.environ.get("MFM_MKT_DIR",
+                     "/content/mkt" if IS_COLAB else os.path.join(LOCAL_DATA_ROOT, "mkt"))
 
 BASE_V = 256
 BPE_V = 4096          # total content vocab
