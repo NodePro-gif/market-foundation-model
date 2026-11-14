@@ -14,6 +14,13 @@ def check(name, got, want):
     print(f"  {'OK ' if ok else 'FAIL'} {name}: got={np.asarray(got).tolist()} want={np.asarray(want).tolist()}")
 
 
+print("== exact UTC calendar-year regression ==")
+# Seconds immediately around the UTC new-year boundary must map to exact years.
+year_ts = np.array([
+    1609459199, 1609459200, 1640995199, 1640995200,
+], dtype=np.int64)
+check("UTC year boundaries", st.years_from_ts(year_ts), [2020, 2021, 2021, 2022])
+
 print("== _merge unit tests ==")
 # simple: merge pair (1,2) -> 99 in [1,2,3,1,2,2,1]
 check("basic", st._merge(np.array([1, 2, 3, 1, 2, 2, 1]), np.array([0, 3]), 99),
