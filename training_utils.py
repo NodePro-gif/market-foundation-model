@@ -138,3 +138,11 @@ def perplexity_from_loss(loss):
     if not math.isfinite(loss) or loss < 0:
         raise ValueError("loss must be finite and non-negative")
     return math.exp(min(loss, 80.0))
+
+
+def split_2022_periods(sample_timestamps):
+    """Split Unix-second timestamps into Jan-Jun calibration and Jul-Dec policy masks."""
+    cutoff = 1656633600  # 2022-07-01 00:00:00 UTC
+    timestamps = [int(value) for value in sample_timestamps]
+    return ([value < cutoff for value in timestamps],
+            [value >= cutoff for value in timestamps])
