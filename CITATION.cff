@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software in research, please cite the repository and the exact commit you used."
+title: "Market Foundation Model"
+type: software
+authors:
+  - family-names: "NodePro-gif"
+repository-code: "https://github.com/NodePro-gif/market-foundation-model"
+version: "0.1.0"
+date-released: "2026-11-14"
+abstract: "Research implementation of a BPE-tokenized, GPT-style foundation model for multi-asset financial time series."
