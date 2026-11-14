@@ -2,7 +2,7 @@
 
 ## Data and chronology
 
-The corrected pipeline fits tokenizer bins, regime clusters and BPE merges on non-held-out assets from 2015–2020 only; held-out assets are encoded with that frozen vocabulary but never shape its statistics. It pretrains on non-held-out assets from 2015–2020 and selects the language-model checkpoint on 2021–2022; fine-tunes on 2015–2020 and selects the supervised checkpoint on 2021; reserves 2022 for calibration/threshold selection; and keeps 2023 as the final test. Earlier committed checkpoints and metrics were produced under a different protocol and must not be presented as results from this corrected split.
+The corrected pipeline fits tokenizer bins, regime clusters and BPE merges on non-held-out assets from 2015–2020 only; held-out assets are encoded with that frozen vocabulary but never shape its statistics. It pretrains on non-held-out assets from 2015–2020 and selects the language-model checkpoint on 2021; fine-tunes on 2015–2020 and selects the supervised checkpoint on 2021; reserves 2022 for calibration/threshold selection; and keeps 2023 as the final test. Earlier committed checkpoints and metrics were produced under a different protocol and must not be presented as results from this corrected split.
 
 **Important:** README/PROGRESS metrics were produced by different runs and configurations (including CPU-reduced strides and GPU-oriented defaults). They are not interchangeable. Record the exact configuration when reproducing a result.
 
@@ -33,7 +33,7 @@ python validate_stage4.py
 python backtest_stage4.py
 ```
 
-Some scripts expect artifacts in a specific local or Colab directory. Prepare those paths before running the sequence; see the script constants and setup instructions in the README. The current committed pretrained checkpoint was created with the previous pretraining/tokenizer protocol. Regenerate tokenizer artifacts and pretraining checkpoints under the corrected chronology before interpreting new fine-tuning metrics. The legacy walk-forward output is retained for auditability, not as a current clean benchmark.
+Some scripts expect artifacts in a specific local or Colab directory. Prepare those paths before running the sequence; see the script constants and setup instructions in the README. The current committed pretrained checkpoint was created with the previous pretraining/tokenizer protocol. Regenerate tokenizer artifacts and pretraining checkpoints under the corrected chronology before interpreting new fine-tuning metrics. `walkforward_stage4.py` is a legacy exploratory script whose folds overlap the former training period. Its historical output is retained for auditability, not as a current clean benchmark. Do not use it to report out-of-sample performance for the corrected protocol.
 
 ## Evaluation safeguards
 

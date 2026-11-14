@@ -1,5 +1,8 @@
 # PROGRESS — log kronologis
 
+> **Status protokol (diperbarui 2026-11-14):** catatan eksperimen di bawah ini adalah rekam historis, bukan hasil evaluasi dari pipeline yang sekarang. Kode telah diperketat ke split kronologis: tokenizer/pretraining/fine-tuning dilatih pada 2015–2020; checkpoint pretraining dan supervised dipilih pada 2021; kalibrasi/threshold dipilih pada 2022; 2023 menjadi final test yang tidak disentuh. Statistik tokenizer/BPE hanya di-fit pada aset non-held-out 2015–2020. Karena checkpoint dan angka historis dibuat dengan protokol lama, seluruh artefak harus dibuat ulang sebelum angka performa baru dilaporkan. Jangan mengutip angka backtest lama sebagai bukti performa out-of-sample pada protokol baru.
+
+
 Catatan "sedang ngapain" untuk tiap tahap. Untuk status **real-time** jalankan:
 
 ```powershell

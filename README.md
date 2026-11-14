@@ -18,7 +18,7 @@ flowchart LR
     D --> E[GPT pretraining]
     E --> F[Multi-task fine-tuning]
     F --> G[Validation and calibration]
-    G --> H[Walk-forward backtest]
+    G --> H[Cost-aware backtest]
 ```
 
 | Stage | Entry point | Responsibility |
@@ -27,7 +27,7 @@ flowchart LR
 | 2. Tokenizer | `stage2_tokenizer.py` | Encode market bars, train BPE merges, generate tokens and labels |
 | 3. Pretraining | `stage3_pretrain.py` | Train a causal GPT-style language model |
 | 4. Fine-tuning | `stage4_finetune.py` | Train direction, volatility and return-quantile heads |
-| Evaluation | `validate_stage4.py`, `walkforward_stage4.py`, `backtest_stage4.py` | Calibration, chronological validation and cost-aware evaluation |
+| Evaluation | `validate_stage4.py`, `backtest_stage4.py` | Calibration, chronological validation and cost-aware evaluation |
 
 ### Model design
 
@@ -130,7 +130,7 @@ $env:ST4_HELD_STRIDE="128"
 python -u stage4_finetune.py
 ```
 
-The corrected chronology is: tokenizer fitting and model training on 2015–2020, pretraining/supervised checkpoint selection on 2021–2022/2021 respectively, calibration on 2022, and final test on 2023. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; the committed checkpoint and historical metrics use the previous protocol.
+**Current research protocol:** fit tokenizer statistics and BPE on non-held-out assets from 2015–2020; pretrain on 2015–2020 and select the pretraining checkpoint on 2021; fine-tune on 2015–2020 and select the supervised checkpoint on 2021; calibrate on 2022; reserve 2023 as the final test. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; committed checkpoints and historical metrics predate the corrected protocol.
 
 For a full reproduction, follow [Reproducibility and data protocol](docs/REPRODUCIBILITY.md) and the experiment notes in [PROGRESS.md](PROGRESS.md). Do not compare runs unless their data split, stride, seed, model checkpoint and cost assumptions match.
 
@@ -154,7 +154,7 @@ python -m compileall -q .
 python test_tokenizer.py
 ```
 
-The GitHub Actions workflow runs these checks on pushes and pull requests.
+The GitHub Actions workflow runs these checks on pushes and pull requests across Python 3.10, 3.11 and 3.12.
 
 ## Documentation
 
@@ -169,4 +169,4 @@ Financial time series are noisy and non-stationary. A high classification metric
 
 ## License
 
-No license is currently specified for this repository. Unless a license is added by the owner, the source code is not granted an open-source license for reuse or redistribution.
+**All rights reserved.** No open-source license has been granted. Do not copy, redistribute or use this code outside the permissions granted by the repository owner.

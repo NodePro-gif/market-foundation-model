@@ -17,6 +17,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python -m compileall -q .
 python test_tokenizer.py
+python -m pip check
 ```
 
 On Windows PowerShell, activate the environment with `.venv\Scripts\Activate.ps1`.

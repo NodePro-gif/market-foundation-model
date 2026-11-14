@@ -14,7 +14,7 @@ This document describes the current repository layout. Training scripts intentio
 | `verify_ckpt.py` | Check compatibility between a checkpoint and regenerated tokenizer |
 | `stage4_finetune.py` | Fine-tune prediction heads |
 | `validate_stage4.py` | Validation-based calibration and threshold selection |
-| `walkforward_stage4.py` | Multi-fold chronological evaluation |
+| `walkforward_stage4.py` | Legacy exploratory walk-forward script; historical output is not a valid benchmark for the corrected split |
 | `backtest_stage4.py` | Cost-aware strategy evaluation |
 
 ## Supporting and diagnostic scripts
