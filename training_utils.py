@@ -2,10 +2,8 @@
 
 import math
 
-from torch.utils.data import Sampler
 
-
-class ExactDistributedEvalSampler(Sampler):
+class ExactDistributedEvalSampler:
     """Shard evaluation indices across ranks without padding or duplication."""
 
     def __init__(self, dataset, num_replicas, rank):
