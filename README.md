@@ -138,7 +138,7 @@ $env:ST4_HELD_STRIDE="128"
 python -u stage4_finetune.py
 ```
 
-**Current research protocol:** fit tokenizer statistics and BPE on non-held-out assets from 2015–2020; pretrain on 2015–2020 and select the pretraining checkpoint on 2021; fine-tune on 2015–2020 and select the supervised checkpoint on 2021; calibrate on 2022; reserve 2023 as the final test. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; committed checkpoints and historical metrics predate the corrected protocol.
+**Current research protocol:** fit tokenizer statistics and BPE on non-held-out assets from 2015–2020; pretrain on 2015–2020 and select the pretraining checkpoint on 2021; fine-tune on 2015–2020 and select the supervised checkpoint on 2021; calibrate on 2022; reserve 2023 as the final test. Regenerate tokenizer and pretrained checkpoints before running this corrected pipeline; historical metrics predate the corrected protocol; model checkpoints are generated locally and are not distributed in Git.
 
 For pretraining on Colab T4, the notebook defaults to micro-batch 32 with 2 gradient-accumulation steps (effective batch 64), FP16 AMP and periodic resumable checkpoints. Fine-tuning defaults to micro-batch 32 with 8 accumulation steps (effective batch 256) and samples training windows with equal probability per non-held-out asset; checkpoint selection remains XAUUSD 2021. These are starting configurations, not guaranteed optimal settings for every runtime. Tune them only using training/validation behavior, never the final test set.
 
