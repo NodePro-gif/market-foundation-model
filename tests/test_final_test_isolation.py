@@ -76,6 +76,7 @@ def test_final_test_has_explicit_repeat_access_lock():
     source = (ROOT / "validate_stage4.py").read_text(encoding="utf-8")
     assert "FINAL_TEST_2023_ACCESSED.lock" in source
     assert "MFM_ALLOW_FINAL_TEST_RERUN" in source
+    assert 'np.save(f"{OUT}/test_bars.npy", bt)' in source
 
 
 def test_backtest_reuses_saved_final_test_bars_instead_of_rebuilding_2023_dataset():
