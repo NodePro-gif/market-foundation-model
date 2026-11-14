@@ -521,6 +521,11 @@ def main():
             )
         if not manifest_ok:
             best_val = float("inf")
+            lr_controller.best = float("inf")
+            lr_controller.bad_evals = 0
+            lr_controller.scale = 1.0
+            early_stopper.best = float("inf")
+            early_stopper.bad_evals = 0
             if IS_MAIN:
                 for stale in (best_path, manifest_path):
                     if os.path.isfile(stale):
