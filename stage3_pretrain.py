@@ -20,8 +20,15 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 IS_COLAB = os.path.isdir("/content")
-MKT = "/content/mkt" if IS_COLAB else r"D:\xauusd-dl\mkt"
-CKPT = "/content/ckpt" if IS_COLAB else r"D:\xauusd-dl\ckpt"
+LOCAL_DATA_ROOT = os.environ.get(
+    "MFM_DATA_ROOT",
+    r"D:\xauusd-dl" if os.name == "nt"
+    else os.path.join(os.path.expanduser("~"), "market-foundation-model-data"),
+)
+MKT = os.environ.get("MFM_MKT_DIR",
+                     "/content/mkt" if IS_COLAB else os.path.join(LOCAL_DATA_ROOT, "mkt"))
+CKPT = os.environ.get("MFM_CKPT_DIR",
+                      "/content/ckpt" if IS_COLAB else os.path.join(LOCAL_DATA_ROOT, "ckpt"))
 LOG = os.path.join(CKPT, "pretrain_log.json")
 
 # ------------------------------------------------------------------ config
