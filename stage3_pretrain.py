@@ -227,10 +227,14 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, N_HEAD, C // N_HEAD).transpose(1, 2)
         k = k.view(B, T, N_HEAD, C // N_HEAD).transpose(1, 2)
         v = v.view(B, T, N_HEAD, C // N_HEAD).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(C // N_HEAD)
-        att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float("-inf"))
-        att = self.drop(torch.softmax(att, dim=-1))
-        return self.drop(att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        # PyTorch SDPA dispatches to the fastest supported attention kernel
+        # (including memory-efficient CUDA implementations when available).
+        y = nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=None,
+            dropout_p=self.drop.p if self.training else 0.0,
+            is_causal=True,
+        )
+        return self.drop(y).transpose(1, 2).contiguous().view(B, T, C)
 
 
 class Block(nn.Module):
