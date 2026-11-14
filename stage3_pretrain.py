@@ -360,6 +360,15 @@ class MarketGPT(nn.Module):
 def main():
     os.makedirs(CKPT, exist_ok=True)
     model = MarketGPT().to(DEVICE)
+    compile_enabled = DEVICE.type == "cuda" and os.environ.get("MFM_TORCH_COMPILE", "0") == "1"
+    if compile_enabled and hasattr(model, "compile"):
+        compile_mode = os.environ.get("MFM_COMPILE_MODE", "reduce-overhead")
+        model.compile(mode=compile_mode)
+        log(f"torch.compile enabled (mode={compile_mode}); ignore initial compile warm-up when comparing throughput")
+    elif compile_enabled:
+        log("torch.compile unavailable in this PyTorch build; using eager execution")
+    if DEVICE.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     log(f"model params: {n_params/1e6:.2f}M on {DEVICE}")
     if DEVICE.type == "cuda":
@@ -471,6 +480,8 @@ def main():
 
     model.train()
     opt.zero_grad(set_to_none=True)
+    perf_t0 = time.time()
+    perf_windows = 0
     while step < MAX_STEPS:
         for i, batch in enumerate(train_dl):
             if step >= MAX_STEPS:
@@ -479,6 +490,7 @@ def main():
             for g in opt.param_groups:
                 g["lr"] = lr
             xb = batch.to(DEVICE, non_blocking=True)
+            perf_windows += int(xb.shape[0])
             group_start = (i // ACCUM_STEPS) * ACCUM_STEPS
             group_size = min(ACCUM_STEPS, len(train_dl) - group_start)
             with torch.autocast(device_type=DEVICE.type, dtype=torch.float16,
@@ -495,9 +507,16 @@ def main():
 
             if update_now:
                 step += 1
-                if step % 10 == 0:
-                    log(f"step {step:>5}  loss {loss.item():.4f}  "
-                        f"ppl {math.exp(min(loss.item(), 20)):8.1f}  lr {lr:.2e}")
+                if step % 50 == 0:
+                    elapsed = max(time.time() - perf_t0, 1e-6)
+                    windows_s = perf_windows / elapsed
+                    peak_gib = (torch.cuda.max_memory_allocated(DEVICE) / 1024**3
+                                if DEVICE.type == "cuda" else 0.0)
+                    log(f"step {step:>5} loss={loss.item():.4f} "
+                        f"ppl={math.exp(min(loss.item(), 20)):8.1f} lr={lr:.2e} "
+                        f"windows/s={windows_s:.1f} peak_vram={peak_gib:.2f}GiB")
+                    perf_t0 = time.time()
+                    perf_windows = 0
                 if step % EVAL_EVERY == 0:
                     vl = evaluate()
                     hist.append(dict(step=step, val_loss=vl, train_loss=loss.item()))
