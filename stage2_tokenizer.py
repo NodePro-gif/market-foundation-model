@@ -267,7 +267,12 @@ def train_bpe(sample, mul=BPE_V):
     log(f"  BPE training on {len(data):,} chars -> {N_MERGES} merges ...")  # or the
     tb = time.time()        # encoder's rank LUT becomes ambiguous
     for m in range(N_MERGES):
-        pairs = data[:-1] * V + data[1:]
+        left, right = data[:-1], data[1:]
+        # Negative sentinel IDs separate independent assets/timeframes/chunks.
+        # They are excluded from pair counts so BPE never learns synthetic
+        # transitions across unrelated series.
+        valid = (left >= 0) & (right >= 0) & (left < V) & (right < V)
+        pairs = left[valid] * V + right[valid]
         cnt = np.bincount(pairs, minlength=V * V)
         while True:
             best = int(cnt.argmax())
@@ -283,7 +288,7 @@ def train_bpe(sample, mul=BPE_V):
             break
         banned.add((a, b))
         nid = V
-        mask = (data[:-1] == a) & (data[1:] == b)
+        mask = valid & (left == a) & (right == b)
         idx = np.flatnonzero(mask)
         if len(idx) > 1:
             idx = idx[np.insert(np.diff(idx) > 1, 0, True)]
@@ -342,6 +347,7 @@ def step_c():
 
     # --- BPE training sample: fit vocabulary on train years only ---------
     chunks = []
+    rng = np.random.default_rng(42)
     for key in sorted(raws):
         rr = raws[key]
         a8 = bin4(rr["a"], edges["a"]).astype(np.int64)
@@ -354,10 +360,18 @@ def step_c():
         if key[0] in HELD_OUT:
             train_ch = train_ch[:0]  # encode held-out assets, never fit on them
         if len(train_ch):
-            chunks.append(train_ch[:: max(1, len(train_ch) // 120000)][:120000])
+            # Use contiguous excerpts, not every Nth bar: BPE must learn
+            # adjacent temporal motifs rather than artificial skip-bar pairs.
+            take = min(len(train_ch), 120000)
+            start = int(rng.integers(0, len(train_ch) - take + 1))
+            chunks.append(train_ch[start:start + take])
     if not chunks:
         raise RuntimeError("no training-period bars available for BPE fitting")
-    sample = np.concatenate(chunks)
+    # -1 is a boundary sentinel, excluded from all BPE pair counts.
+    separated = []
+    for chunk in chunks:
+        separated.extend((chunk, np.array([-1], dtype=np.int64)))
+    sample = np.concatenate(separated)
     merge_arr, new_ids = train_bpe(sample)
 
     # --- encode every series ---------------------------------------------
