@@ -13,7 +13,12 @@ def _year_2023_finetune_calls(source):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not (isinstance(func, ast.Name) and func.id == "FinetuneDS"):
+        is_finetune_ds = (
+            isinstance(func, ast.Name) and func.id == "FinetuneDS"
+        ) or (
+            isinstance(func, ast.Attribute) and func.attr == "FinetuneDS"
+        )
+        if not is_finetune_ds:
             continue
         for kw in node.keywords:
             if kw.arg == "years" and isinstance(kw.value, ast.List):
