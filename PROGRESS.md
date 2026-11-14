@@ -1,5 +1,19 @@
 # PROGRESS — log kronologis
 
+## 2026-11-14 — T4 throughput optimization
+
+- Pretraining default micro-batch increased from 32 to 64; accumulation changed from 2 to 1, preserving effective batch 64.
+- Fine-tuning default micro-batch increased from 32 to 64; accumulation changed from 8 to 4, preserving effective batch 256.
+- Enabled fused AdamW where supported, CUDA matmul precision tuning, pinned-memory batches, non-blocking host-to-device transfers, persistent workers and configurable prefetching.
+- Increased pretraining DataLoader workers to 4 and fine-tuning workers to 2 for the Colab T4 preset.
+- Fixed repeated decompression of compressed pretraining token arrays by caching the materialized array once per worker.
+- Changed Colab workspace to use local VM disk for active training, with Drive restore/sync at stage boundaries and periodic checkpoint mirroring to persistent Drive storage.
+- These are safe starting settings for a 16 GiB T4, not a promise of 100% GPU utilization. If a runtime reports CUDA OOM, reduce the micro-batch to 48 or 32 while keeping the effective batch constant by increasing accumulation proportionally.
+- Full GPU throughput and memory measurements still require an actual Colab T4 run; CI only validates syntax, data-independent tests, and notebook structure.
+
+---
+
+
 ## 2026-11-14 — PR #2: training, head architecture, and portfolio hardening
 
 - Fine-tuning optimizer remains AdamW; added linear warmup + cosine decay per optimizer update, gradient clipping, and early stopping based only on XAUUSD 2021 validation AUC.
