@@ -480,81 +480,27 @@ def main():
         raise SystemExit("no valid checkpoint was selected; validation AUC is undefined")
     model.load_state_dict(torch.load(best_path, map_location="cpu",
                                      weights_only=True))
-    # Only now materialize the untouched final-test dataset.
-    test_ds = FinetuneDS(TARGET_SYM, years=[2023], stride=TEST_STRIDE)
-    if not len(test_ds):
-        raise SystemExit("empty final-test dataset for 2023")
-    te_dl = DataLoader(test_ds, batch_size=BATCH, shuffle=False, **loader_args)
-    te = run_epoch(model, te_dl, None)
-    log(f"TEST XAUUSD 2023: acc={te['acc']:.4f} auc={te['auc']:.4f} "
-        f"brier={te['brier']:.4f} ece={te['ece']:.4f} n={len(te['y']):,}")
-
-    # regime-conditional
-    log("--- regime-conditional test metrics ---")
-    for reg in range(6):
-        m = te["reg"] == reg
-        if m.sum() < 200:
-            continue
-        b, e = brier_ece(te["pred"][m], te["y"][m])
-        log(f"  regime {reg}: n={m.sum():,} acc="
-            f"{float(((te['pred'][m] >= .5).astype(int) == te['y'][m]).mean()):.4f} "
-            f"brier={b:.4f} ece={e:.4f}")
-
-    # held-out symbols
-    log("--- held-out symbols (never in pretraining) ---")
-    held_res = {}
-    for sym in HELD:
-        try:
-            ds = FinetuneDS(sym, years=[2023], stride=HELD_STRIDE)
-            if len(ds) == 0:
-                continue
-            dl = DataLoader(ds, batch_size=BATCH, shuffle=False)
-            r = run_epoch(model, dl, None)
-            held_res[sym] = dict(acc=r["acc"], auc=r["auc"],
-                                 brier=r["brier"], n=len(r["y"]))
-            log(f"  {sym}: acc={r['acc']:.4f} auc={r['auc']:.4f} "
-                f"brier={r['brier']:.4f} n={len(r['y']):,}")
-        except FileNotFoundError:
-            log(f"  {sym}: no data")
-
-    # Quantile coverage: fraction of realized forward returns below each
-    # predicted P10/P50/P90, calculated only after final-test inference.
-    quantile_coverage = None
-    if "raw" in te:
-        pq = np.concatenate([t[2] for t in te["raw"]], axis=0)
-        yq = np.concatenate([t[3] for t in te["raw"]], axis=0)
-        vq = np.concatenate([t[4] for t in te["raw"]], axis=0)
-        covered = (yq[:, :, None] <= pq).astype(np.float64)
-        denom = vq.sum(axis=0)[:, None]
-        numer = (covered * vq[:, :, None]).sum(axis=0)
-        quantile_coverage = np.divide(
-            numer, denom, out=np.full_like(numer, np.nan), where=denom > 0
-        ).tolist()
-        log("quantile coverage by horizon [P10, P50, P90]: "
-            f"{np.round(np.asarray(quantile_coverage), 4).tolist()}")
-
-    json.dump(dict(test=dict(acc=te["acc"], auc=te["auc"],
-                             brier=te["brier"], ece=te["ece"],
-                             n=int(len(te["y"]))),
-                   held_out=held_res, quantile_coverage=quantile_coverage,
-                   protocol=dict(train_years=[2015, 2020], checkpoint_selection_year=2021,
-                                 calibration_year=2022, final_test_year=2023),
-                   config=dict(epochs=EPOCHS, batch=BATCH, accumulation=ACCUM_STEPS,
-                               learning_rate=LR, warmup_ratio=WARMUP_RATIO,
-                               min_lr_ratio=MIN_LR_RATIO,
-                               early_stop_patience=EARLY_STOP_PATIENCE,
-                               optimizer="AdamW", scheduler="linear-warmup+cosine-decay",
-                               total_optimizer_updates=total_updates,
-                               train_stride=STRIDE,
-                               validation_stride=VAL_STRIDE, test_stride=TEST_STRIDE,
-                               train_symbols=list(train_windows_by_symbol),
-                               train_windows_by_symbol=train_windows_by_symbol,
-                               sampling="equal_probability_per_asset",
-                               amp=USE_AMP, device=str(DEVICE))),
-              open(f"{OUT}/metrics.json", "w"), indent=1)
-    np.save(f"{OUT}/test_pred.npy", te["pred"])
-    np.save(f"{OUT}/test_y.npy", te["y"])
-    np.save(f"{OUT}/test_reg.npy", te["reg"])
+    # Stage 4 is strictly train/validation only. It must never instantiate,
+    # infer on, or write labels/predictions from the locked 2023 final test.
+    # The separate validation/calibration entry point owns the single final
+    # evaluation, after its 2022 policy has been locked.
+    json.dump(dict(
+        best_validation_auc=float(best_val_auc),
+        protocol=dict(train_years=[2015, 2020], checkpoint_selection_year=2021,
+                      calibration_year=2022, final_test_year=2023,
+                      final_test_access="forbidden_in_stage4"),
+        config=dict(epochs=EPOCHS, batch=BATCH, accumulation=ACCUM_STEPS,
+                    learning_rate=LR, warmup_ratio=WARMUP_RATIO,
+                    min_lr_ratio=MIN_LR_RATIO,
+                    early_stop_patience=EARLY_STOP_PATIENCE,
+                    optimizer="AdamW", scheduler="linear-warmup+cosine-decay",
+                    total_optimizer_updates=total_updates,
+                    train_stride=STRIDE, validation_stride=VAL_STRIDE,
+                    train_symbols=list(train_windows_by_symbol),
+                    train_windows_by_symbol=train_windows_by_symbol,
+                    sampling="equal_probability_per_asset",
+                    amp=USE_AMP, device=str(DEVICE))),
+        open(os.path.join(OUT, "finetune_metrics.json"), "w"), indent=2)
     log("STAGE4 DONE")
     print("STAGE4 DONE", flush=True)
 
