@@ -56,20 +56,22 @@ def auc_rank(y, s):
 
 
 def predict(ds):
-    """Run the fine-tuned heads over a dataset -> (prob, label)."""
-    ckpt = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "results", "finetune", "best.pt")
-    base = s4.load_base(os.environ.get("CKPT") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "ckpt", "best.pt"))
-    model = s4.FinetuneGPT(base)
+    """Run the fine-tuned heads on the configured device."""
+    ckpt = os.path.join(s4.OUT, "best.pt")
+    base_ckpt = os.environ.get("CKPT") or os.path.join(s4.s3.CKPT, "best.pt")
+    base = s4.load_base(base_ckpt)
+    model = s4.FinetuneGPT(base).to(s4.DEVICE)
     model.load_state_dict(torch.load(ckpt, map_location="cpu",
                                      weights_only=True))
     model.eval()
     ps, ys = [], []
     with torch.no_grad():
         for xb, yd, *_ in DataLoader(ds, batch_size=64, shuffle=False):
-            pd, _, _ = model(xb)
-            ps.append(torch.sigmoid(pd).numpy())
+            xb = xb.to(s4.DEVICE)
+            with torch.autocast(device_type=s4.DEVICE.type, dtype=torch.float16,
+                                enabled=s4.DEVICE.type == "cuda" and s4.USE_AMP):
+                pd, _, _ = model(xb)
+            ps.append(torch.sigmoid(pd).float().cpu().numpy())
             ys.append(yd.numpy() if torch.is_tensor(yd) else np.asarray(yd))
     return np.concatenate(ps), np.concatenate(ys)
 
