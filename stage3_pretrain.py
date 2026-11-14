@@ -71,6 +71,14 @@ def years_from_ts(ts):
             .astype("datetime64[Y]").astype(np.int32) + 1970)
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def tokenizer_fingerprint():
     """Bind a checkpoint to the exact tokenizer artifacts used to train it."""
     digest = hashlib.sha256()
@@ -335,9 +343,9 @@ def main():
     hist = []
     manifest_path = os.path.join(CKPT, "best_manifest.json")
     fingerprint = tokenizer_fingerprint()
-    if RESUME and os.path.isfile(os.path.join(CKPT, "resume.pt")):
-        state = torch.load(os.path.join(CKPT, "resume.pt"),
-                           map_location="cpu", weights_only=False)
+    resume_path = os.path.join(CKPT, "resume.pt")
+    if RESUME and os.path.isfile(resume_path):
+        state = torch.load(resume_path, map_location="cpu", weights_only=False)
         if state.get("tokenizer_fingerprint") != fingerprint:
             raise RuntimeError("resume checkpoint tokenizer fingerprint mismatch")
         model.load_state_dict(state["model"])
@@ -353,6 +361,12 @@ def main():
         if DEVICE.type == "cuda" and state.get("cuda_rng") is not None:
             torch.cuda.set_rng_state_all(state["cuda_rng"])
         log(f"resumed from step {step}, best_val={best_val:.5f}")
+    else:
+        # A fresh run must never leave an older best checkpoint eligible for use.
+        for stale in (os.path.join(CKPT, "best.pt"), manifest_path, resume_path):
+            if os.path.isfile(stale):
+                os.remove(stale)
+        log("starting fresh pretraining run")
 
     def evaluate():
         model.eval()
@@ -414,6 +428,7 @@ def main():
                             n_layer=N_LAYER, n_head=N_HEAD, n_embd=N_EMBD,
                             train_years=[2015, 2020], checkpoint_selection_year=2021,
                             global_step=step, best_validation_loss=vl,
+                            checkpoint_sha256=sha256_file(os.path.join(CKPT, "best.pt")),
                         ))
                         log(f"  new best val {vl:.4f} -> best.pt (tokenizer bound)")
                 if step % CKPT_EVERY == 0:
