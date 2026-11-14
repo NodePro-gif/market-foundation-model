@@ -121,9 +121,20 @@ The downloader may report unavailable source files. Review its summary and the d
 The training scripts use the paths and configuration defined in their source files. On a Colab GPU runtime, prepare the token artifacts under `/content/mkt` and run:
 
 ```bash
+# Colab / single GPU
 python stage3_pretrain.py
+
+# Kaggle with two GPUs (the Kaggle notebook uses this command)
+torchrun --standalone --nnodes=1 --nproc_per_node=2 stage3_pretrain.py
+
+# Fine-tuning, 2021 checkpoint selection, 2022 calibration,
+# then the locked 2023 final evaluation and portfolio report
 python stage4_finetune.py
+python validate_stage4.py
+python backtest_stage4.py
 ```
+
+Do not rerun validate_stage4.py to tune a strategy after viewing 2023. Its 2023 section is a final report for the policy already selected on 2022. For a new research iteration, change the model/policy using training and validation periods, then preserve a fresh untouched final period.
 
 For the fine-tuning script, selected settings can be overridden through environment variables:
 
