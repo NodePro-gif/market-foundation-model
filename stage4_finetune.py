@@ -17,6 +17,7 @@ Evaluation:
 import json
 import math
 import os
+import shutil
 import time
 
 import numpy as np
@@ -77,6 +78,20 @@ t0 = time.time()
 
 def log(m):
     print(f"[{time.time()-t0:7.1f}s] {m}", flush=True)
+
+
+def atomic_ft_save(payload, path):
+    """Atomically save fine-tune weights without touching the Stage-3 checkpoint."""
+    tmp = path + ".tmp"
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
+    backup_dir = os.environ.get("MFM_FT_BACKUP_DIR")
+    if backup_dir:
+        os.makedirs(backup_dir, exist_ok=True)
+        target = os.path.join(backup_dir, os.path.basename(path))
+        backup_tmp = target + ".tmp"
+        shutil.copy2(path, backup_tmp)
+        os.replace(backup_tmp, target)
 
 
 # --------------------------------------------------------------- dataset
@@ -468,7 +483,7 @@ def main():
         if np.isfinite(va["auc"]) and va["auc"] > best_val_auc + 1e-5:
             best_val_auc = va["auc"]
             stale_epochs = 0
-            s3.atomic_torch_save(model.state_dict(), best_path)
+            atomic_ft_save(model.state_dict(), best_path)
         else:
             stale_epochs += 1
             log(f"  no validation AUC improvement ({stale_epochs}/{EARLY_STOP_PATIENCE})")
