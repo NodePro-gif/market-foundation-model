@@ -12,7 +12,9 @@ import hashlib
 import json
 import math
 import os
+import queue
 import shutil
+import threading
 import time
 
 import numpy as np
@@ -111,15 +113,47 @@ def tokenizer_fingerprint():
     return digest.hexdigest()
 
 
+_MIRROR_QUEUE = queue.Queue()
+_MIRROR_THREAD = None
+
+
+def _mirror_worker():
+    while True:
+        path = _MIRROR_QUEUE.get()
+        try:
+            if path is None:
+                return
+            backup_dir = os.environ.get("MFM_CKPT_BACKUP_DIR")
+            if not backup_dir or not os.path.isfile(path):
+                continue
+            os.makedirs(backup_dir, exist_ok=True)
+            target = os.path.join(backup_dir, os.path.basename(path))
+            tmp = target + f".{os.getpid()}.tmp"
+            shutil.copy2(path, tmp)
+            os.replace(tmp, target)
+        except Exception as exc:
+            print(f"[checkpoint mirror warning] {exc}", flush=True)
+        finally:
+            _MIRROR_QUEUE.task_done()
+
+
 def _mirror_checkpoint(path):
+    global _MIRROR_THREAD
     backup_dir = os.environ.get("MFM_CKPT_BACKUP_DIR")
-    if not backup_dir:
+    # Stage 4 also uses atomic_torch_save. Never let its fine-tuned best.pt
+    # overwrite Stage 3's pretrained best.pt in the shared Drive checkpoint dir.
+    if not backup_dir or os.path.abspath(os.path.dirname(path)) != os.path.abspath(CKPT):
         return
-    os.makedirs(backup_dir, exist_ok=True)
-    target = os.path.join(backup_dir, os.path.basename(path))
-    tmp = target + ".tmp"
-    shutil.copy2(path, tmp)
-    os.replace(tmp, target)
+    if _MIRROR_THREAD is None:
+        _MIRROR_THREAD = threading.Thread(target=_mirror_worker, daemon=True)
+        _MIRROR_THREAD.start()
+    _MIRROR_QUEUE.put(path)
+
+
+def flush_checkpoint_mirrors():
+    """Wait for queued Drive copies before a normal process exit."""
+    if _MIRROR_THREAD is not None:
+        _MIRROR_QUEUE.join()
 
 
 def atomic_json(path, payload):
@@ -546,6 +580,7 @@ def main():
 
     atomic_torch_save(model.state_dict(), f"{CKPT}/final.pt")
     atomic_json(LOG, hist)
+    flush_checkpoint_mirrors()
     log(f"DONE best_val={best_val:.4f}  params={n_params/1e6:.2f}M  batch={BATCH} accum={ACCUM_STEPS}")
     print("STAGE3 DONE", flush=True)
 
