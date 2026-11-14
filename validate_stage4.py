@@ -3,7 +3,7 @@
 
 Fixes three problems at once:
 
-1. Calibration      - fit Platt scaling on 2021-2022 (not on the test set),
+1. Calibration      - fit Platt scaling on the reserved 2022 period (not on the test set),
                       report test ECE before/after.
 2. Threshold choice - pick the betting threshold on 2021-2022, lock it,
                       then touch 2023 exactly once (no post-hoc selection).
@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 import stage4_finetune as s4
 
 VAL_YEARS = (2022,)  # reserved for calibration/threshold selection
-HORIZONS = (1, 3, 6, 12, 24, 48)          # bars held (must be <= stride grid)
+HORIZONS = (1, 3, 6, 12, 24, 48)          # holding horizons evaluated on validation only
 # 0.5 / 1.5 / 3.0 bps PER SIDE (1 bps = 1e-4); round trip = 2 sides
 COSTS_SIDE = (0.00005, 0.00015, 0.00030)
 MIN_BETS = 100
