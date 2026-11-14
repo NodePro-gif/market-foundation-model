@@ -1,442 +1,170 @@
-# Market Foundation Model — XAUUSD & Multi-Asset
+# Market Foundation Model
 
-Sistem AI/ML trading yang dilatih untuk **memahami konteks pasar** (bukan sekadar
-mencari pola OHLC), dengan arsitektur ala LLM: *tokenizer* pasar → *pretraining*
-autoregresif di korpus multi-aset → *fine-tuning* ke kepala prediksi.
+[![CI](https://github.com/NodePro-gif/market-foundation-model/actions/workflows/ci.yml/badge.svg)](https://github.com/NodePro-gif/market-foundation-model/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 
+A research codebase for a GPT-style **market foundation model**. It converts OHLCV bars into a learned market-token sequence, pretrains a causal transformer on multi-asset data, and fine-tunes prediction heads for market direction, volatility regime, and return quantiles.
+
+> **Research software — not financial advice.** Reported metrics are historical experiments, not guarantees of future performance. Trading costs, slippage, data quality, and out-of-sample validation materially affect results.
+
+## Overview
+
+```mermaid
+flowchart LR
+    A[Historical OHLCV] --> B[Corpus preparation]
+    B --> C[Market feature encoding]
+    C --> D[BPE tokenizer]
+    D --> E[GPT pretraining]
+    E --> F[Multi-task fine-tuning]
+    F --> G[Validation and calibration]
+    G --> H[Walk-forward backtest]
 ```
-bar → 4 atribut × 4 bin (256 "huruf") → BPE merge → 4.096 "kata"
-     → GPT decoder-only (12,44M param, ctx 512) → [arah | regime vol | kuantil return]
-```
 
----
-
-## 1. Cara kerja sistem (pipeline lengkap)
-
-| Stage | Script | Apa yang dilakukan |
+| Stage | Entry point | Responsibility |
 |---|---|---|
-| **1** | `stage1_corpus.py` / `download_local.py` | Unduh korpus: 19 simbol × M5 2015–2023 + M1 (XAUUSD, EURUSD) dari EV Trading Labs. ±175 file, 359 MB. |
-| **2** | `stage2_tokenizer.py` | Kalibrasi bin, cluster regime (KMeans 6 kelas), **BPE training** (3.840 merge → vocab 4.096), encoding seluruh korpus → token, plus label (arah, vol, regime, sesi, return 12/48/288). |
-| **3** | `stage3_pretrain.py` | **Pretraining GPT** di seluruh korpus (2015–2022), model 12,44M param, ctx 512, AMP fp16, checkpoint tiap 250 step. 2023 di-holdout. |
-| **4** | `stage4_finetune.py` | **Fine-tune** 3 kepala prediksi + evaluasi jujur: XAUUSD 2023, simbol held-out, kalibrasi Brier/ECE, metrik per-regime. |
+| 1. Corpus | `stage1_corpus.py`, `download_local.py` | Retrieve and verify historical multi-asset data |
+| 2. Tokenizer | `stage2_tokenizer.py` | Encode market bars, train BPE merges, generate tokens and labels |
+| 3. Pretraining | `stage3_pretrain.py` | Train a causal GPT-style language model |
+| 4. Fine-tuning | `stage4_finetune.py` | Train direction, volatility and return-quantile heads |
+| Evaluation | `validate_stage4.py`, `walkforward_stage4.py`, `backtest_stage4.py` | Calibration, chronological validation and cost-aware evaluation |
 
-### Detail arsitektur
+### Model design
 
-- **Tokenizer**: tiap bar → 4 atribut (arah close, posisi close di range, besaran
-  range, perubahan volume) masing-masing 4 bin → 256 "huruf" → BPE merge →
-  **4.096 "kata"**. Layout vocab: `0–255` char, `256–4095` BPE, `4096+` specials
-  (PAD/BOS/EOS), simbol, timeframe, regime, sesi.
-- **Konteks**: tiap jendela diawali `[BOS][SIMBOL][TF][REGIME][SESI]`.
-  Regime = 6 kelas keadaan pasar (tenang-trend, tenang-range, bergejolak-trend,
-  bergejolak-range, krisis, recovery) dari KMeans.
-- **Model**: GPT decoder-only, 6 layer, 8 head, d=384, weight tying, **12,44M param**.
-- **Pretraining**: next-token prediction, 15.087 jendela (2015–2022), 3.000 step
-  (±67 menit di T4), val loss 8,40 → **5,89**.
-- **Fine-tune**: 3 kepala pada hidden state terakhir —
-  (a) arah bar berikutnya (BCE), (b) regime volatilitas 4-kelas (CE),
-  (c) kuantil return P10/P50/P90 untuk horizon 12/48/288 bar (pinball).
+- Decoder-only transformer with 6 layers, 8 attention heads, embedding width 384 and context length 512.
+- Approximately 12.44 million parameters.
+- Market tokenizer: 256 base bar symbols, BPE vocabulary of 4,096 content tokens, plus context and special tokens.
+- Context metadata includes asset, timeframe, market regime and session.
+- Multi-task outputs: next-bar direction, volatility regime and forward-return quantiles (12, 48 and 288 bars).
 
-### Baseline (Fase 1, XAUUSD M5 2020–2023)
+## Repository layout
 
-| Model | test acc | test AUC |
-|---|---|---|
-| GRU 2×128 | 0,5159 | 0,5206 |
-| MLP | 0,5115 | 0,5148 |
-| LogisticRegression | 0,5145 | 0,5190 |
-| mayoritas | 0,5051 | — |
+The existing training entry points remain at the repository root to preserve their current imports and execution commands.
 
-Diagnosis: arsitektur sehat (overfit 2.048 sampel → 99,76%), training konvergen,
-tapi **fitur OHLC mentok** — inilah alasan sistem baru dibangun.
-
----
-
-## 2. File yang TIDAK ada di GitHub (dan cara mendapatkannya)
-
-Data mentah ±1,2 GB sengaja **dikecualikan** dari git (bisa diunduh ulang, bukan
-sistem). Yang dikecualikan lewat `.gitignore`:
-
-```
-corpus/   342,7 MB  — korpus mentah (.json.gz)
-npz/      178,2 MB  — hasil parse per series
-mkt/      229,1 MB  — token + label (artefak tokenizer)
-parts/    211,8 MB  — pecahan zip untuk upload ke Colab
-*.zip     216 MB    — mkt_upload.zip, results.zip
-gold_price.csv.gz 29,7 MB — data baseline XAUUSD
-```
-
-### Cara mendapatkan semuanya dari nol
-
-```bash
-# 1. Unduh korpus (19 simbol × M5 2015–2023 + M1 XAUUSD/EURUSD)
-python download_local.py
-
-# 2. Tokenisasi penuh (parse → kalibrasi → BPE → encoding → label)
-python stage2_tokenizer.py
-
-# 3. Pack artefak ringan untuk diunggah ke Colab
-python pack_artifacts.py      # → mkt_upload.zip (±222 MB)
-python split_parts.py         # → parts/mkt.z00 … mkt.z05 (±42 MB each)
-```
-
-Catatan:
-- Sumber data: `https://evtradelabs.com/api/simulator/data/{SYMBOL}/{TF}/{YEAR}.json.gz`
-  (tanpa login untuk tahun tertutup). 14 file tidak tersedia di penyedia.
-- `stage2_tokenizer.py` bisa jalan di lokal (Windows) maupun di VM (`/content`).
-- Untuk upload ke Colab: file >50 MB gagal dengan satu PUT — pecah jadi bagian
-  ±42 MB (`split_parts.py`), lalu rakit di VM (`assemble.py`).
-
-### File yang SUDAH ada di GitHub
-
-- Semua script: `stage1_corpus.py`, `stage2_tokenizer.py`, `stage3_pretrain.py`,
-  `stage4_finetune.py`, `train_xauusd.py`, `diag.py`, `test_tokenizer.py`, dll.
-- `ckpt/best.pt` — **model pretraining terbaik** (val 5,8945 @ step 3000, 53 MB).
-- `ckpt/pretrain_log.json` — kurva val loss.
-- `results/` — hasil baseline (metrics, plot, prediksi, model GRU/MLP).
-
----
-
-## 3. Menjalankan di Google Colab (GPU T4)
-
-```bash
-# 1. Buat session GPU
-colab new -s gpu --gpu T4
-
-# 2. Unggah artefak token (pecahan) + script
-colab upload -s gpu parts/mkt.z00 /content/mkt.z00   # … z01–z05
-colab upload -s gpu assemble.py /content/assemble.py
-colab upload -s gpu stage3_pretrain.py /content/stage3_pretrain.py
-colab upload -s gpu stage4_finetune.py /content/stage4_finetune.py
-colab upload -s gpu ckpt/best.pt /content/ckpt_best.pt
-
-# 3. Rakit + siapkan
-colab exec -s gpu -f assemble.py
-colab exec -s gpu -f prep_stage4.py
-
-# 4. Pretraining (±67 menit) — GUNAKAN --timeout 0
-colab exec -s gpu --timeout 0 -f stage3_pretrain.py
-
-# 5. Fine-tune + evaluasi
-colab exec -s gpu --timeout 0 -f stage4_finetune.py
-```
-
-### ⚠️ Jebakan yang sudah diketahui (penting!)
-
-1. **Session Colab mati saat idle** → selalu `colab sessions` dulu; siapkan semua
-   artefak lokal sebelum membuka session.
-2. **Upload file >50 MB gagal** (SSL/500) → pecah jadi bagian ±42 MB.
-3. **`colab exec` timeout default 30 detik tanpa output** → saat evaluasi,
-   koneksi putus dan cell berhenti. Selalu pakai `--timeout 0`.
-4. **CUDA "device-side assert"** = ada index ke luar vocab (mis. label regime
-   sentinel 255). Setelah assert, context GPU keracunan → harus session baru.
-5. **CUDA OOM** = sisa memori run crash sebelumnya menumpuk di kernel yang sama
-   (kernel Colab persist antar-exec). Solusi: `gc.collect()` + `torch.cuda.empty_cache()`,
-   atau batch lebih kecil.
-6. **Autentikasi**: token OAuth Colab disimpan di Windows Credential Locker;
-   bila hilang, `auth_helper.py` menjalankan ulang flow PKCE.
-
----
-
-## 4. Struktur repo
-
-```
+```text
 .
-├── stage1_corpus.py        # unduh korpus (versi VM)
-├── download_local.py       # unduh korpus (versi lokal/Windows)
-├── stage2_tokenizer.py     # tokenizer pasar + BPE + label
-├── test_tokenizer.py       # self-test tokenizer (wajib lolos sebelum pakai)
-├── stage3_pretrain.py      # pretraining GPT
-├── verify_ckpt.py          # cek ckpt/best.pt masih selaras dgn tokenizer baru
-├── stage4_finetune.py      # fine-tune + evaluasi
-├── backtest_stage4.py      # backtest biaya-nyata dari prediksi stage4
-├── train_xauusd.py         # baseline XAUUSD (GRU + MLP)
-├── diag.py                 # diagnosis kenapa baseline mentok
-├── assemble.py             # rakit artefak di VM
-├── prep_stage4.py          # siapkan ckpt + year map di VM
-├── pack_artifacts.py       # pack artefak ringan
-├── split_parts.py          # pecah zip untuk upload
-├── ckpt/                   # model pretraining + log
-│   ├── best.pt
-│   └── pretrain_log.json
-├── results/                # hasil baseline
-│   ├── metrics.json
-│   ├── test_predictions.csv
-│   ├── *.png
-│   └── gru.pt / mlp.pt
-└── results/finetune/       # hasil stage4 (metrics.json; bobot di-ignore)
+├── .github/workflows/       # Continuous integration
+├── docs/                    # Project and reproducibility documentation
+├── ckpt/                    # Pretrained checkpoint and training log
+├── results/                 # Tracked experiment metrics and figures
+├── stage1_corpus.py         # Stage 1: corpus download
+├── stage2_tokenizer.py      # Stage 2: tokenizer and labels
+├── stage3_pretrain.py       # Stage 3: GPT pretraining
+├── stage4_finetune.py       # Stage 4: prediction-head fine-tuning
+├── validate_stage4.py       # Calibration and validation
+├── walkforward_stage4.py    # Walk-forward evaluation
+├── backtest_stage4.py       # Cost-aware backtest
+├── probe_transfer.py        # Cross-asset transfer experiment
+├── test_tokenizer.py        # Tokenizer self-test
+├── monitor.py               # Run and result monitor
+├── PROGRESS.md              # Chronological experiment log
+├── requirements.txt
+└── pyproject.toml
 ```
 
-## 5. Hasil pretraining (sistem baru)
+See [Project structure](docs/PROJECT_STRUCTURE.md) for the role of supporting scripts and generated artifacts.
 
-| step | val_loss | ppl |
-|---|---|---|
-| 250 | 6,4024 | 603 |
-| 500 | 6,1102 | 450 |
-| 1000 | 5,9801 | 396 |
-| 2000 | 5,9181 | 372 |
-| **3000** | **5,8945** | **363** |
+## Quick start
 
-Val loss turun di setiap evaluasi tanpa overfit → model benar-benar belajar
-"bahasa pasar". Hasil fine-tune + evaluasi lengkap lihat `results/` setelah
-menjalankan `stage4_finetune.py`.
+### 1. Environment
 
-## 6. Kekuatan & batasan yang jujur
+Python 3.10 or newer is recommended. Create an isolated environment:
 
-**Kekuatan:** konteks lintas-aset (19 simbol), kondisi pasar (regime/sesi),
-output distribusi (bukan angka tunggal), evaluasi ter-holdout ketat
-(2023 tak pernah dilihat; NIKKEI/BRENT/EURGBP tak pernah dipakai saat pretraining).
+```bash
+python -m venv .venv
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 
-**Batasan:** arah harga M5 adalah target tersulit di keuangan — pemain dengan
-data order-flow pun tidak banyak mendapatkan di sini. Model ini menghasilkan
-**distribusi probabilitas terkalibrasi**, bukan ramalan pasti.
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
 
----
+For Google Colab, PyTorch is normally preinstalled. Install the remaining dependencies with:
 
-## 7. Status progres (11 Nov 2026) — pipeline dijalankan ulang dari nol
+```bash
+pip install numpy pandas scikit-learn matplotlib
+```
 
-Seluruh pipeline di-reproduce end-to-end di Windows lokal (CPU saja, 4 thread,
-tanpa Colab/GPU) untuk membuktikan repo bisa jalan dari nol:
+### 2. Obtain the data and prepare tokens
 
-| # | langkah | script | hasil |
-|---|---|---|---|
-| 1 | unduh korpus | `download_local.py` | 175/189 file, 359 MB, ±20 detik (14 missing = sudah diketahui) |
-| — | self-test | `test_tokenizer.py` | **PASSED**, 0 failure |
-| 2 | tokenisasi | `stage2_tokenizer.py` | 21 series, BPE **3.840 merge → vocab 4096**, kompresi ±1,45×, 21 menit |
-| — | integritas ckpt | `verify_ckpt.py` | val_loss **5,9381** vs publikasi 5,8945 → tokenizer hasil regenerasi **SELARAS** dengan `ckpt/best.pt` |
-| 4 | fine-tune + evaluasi | `stage4_finetune.py` | 1 epoch 23 menit → acc 0,5692/AUC 0,6199; **2 epoch 40 menit → acc 0,5872/AUC 0,6792** (tabel bawah) |
-| — | backtest | `backtest_stage4.py` | 780 taruhan 1-bar, edge +0,78 bps/taruhan (t 5,28), breakeven cost 0,39 bps/side |
+Raw market data and generated token arrays are intentionally excluded from Git because of their size. The downloader retrieves the available historical files; the tokenizer creates the local artifacts.
 
-### Hasil fine-tune lokal (CPU)
+```bash
+python download_local.py
+python test_tokenizer.py
+python stage2_tokenizer.py
+```
 
-Konfigurasi kecil karena keterbatasan CPU (lihat knob di bawah): stride latih
-256 → 2.068 window (2015–2022), test 2023 stride 64 → 780 window, batch 16,
-LR 3e-4, seed 42 (run 1 & 2 epoch identik sampai digit di epoch 1 → deterministik).
+The downloader may report unavailable source files. Review its summary and the data-provider availability before treating a corpus as complete.
 
-| model | test acc | test AUC | Brier | ECE |
-|---|---|---|---|---|
-| mayoritas (baseline) | 0,5051 | — | — | — |
-| LogisticRegression | 0,5145 | 0,5190 | — | — |
-| MLP (baseline) | 0,5115 | 0,5148 | — | — |
-| GRU 2×128 (baseline) | 0,5159 | 0,5206 | — | — |
-| Market GPT fine-tune, 1 epoch | 0,5692 | 0,6199 | 0,2443 | **0,0453** |
-| **Market GPT fine-tune, 2 epoch** | **0,5872** | **0,6792** | **0,2279** | 0,1077 |
+### 3. Pretrain and fine-tune
 
-Catatan jujur soal kalibrasi: epoch ke-2 menaikkan AUC (0,6199 → 0,6792) dan
-menurunkan Brier (0,2443 → 0,2279), tetapi **ECE memburuk** (0,0453 → 0,1077)
-— fine-tune lanjut membuat probabilitas makin pekat (over-confidence). Bila
-dipakai untuk sizing posisi, kepala sebaiknya di-platt-scale dulu.
+The training scripts use the paths and configuration defined in their source files. On a Colab GPU runtime, prepare the token artifacts under `/content/mkt` and run:
 
-Metrik lengkap: `results/finetune/metrics.json` (run 2 epoch; arsip run 1:
-`metrics_cpu_1ep.json`, `backtest_1ep.json`). Per-regime pada test 2023 hanya
-regime 1 yang cukup sampel (n=335, acc 0,5731, Brier 0,2237).
+```bash
+python stage3_pretrain.py
+python stage4_finetune.py
+```
 
-**Simbol held-out (tak pernah dilihat saat pretraining)** — dipakai untuk
-menguji generalisasi lintas-aset (run 2 epoch):
+For the fine-tuning script, selected settings can be overridden through environment variables:
 
-| simbol | acc | AUC | Brier | n |
-|---|---|---|---|---|
-| NIKKEI | 0,4780 | 0,4838 | 0,3037 | 364 |
-| BRENT | 0,5144 | 0,5293 | 0,2798 | 348 |
-| EURGBP | 0,5196 | 0,5222 | 0,2800 | 408 |
+| Variable | Default | Meaning |
+|---|---:|---|
+| `ST4_EPOCHS` | 3 | Fine-tuning epochs |
+| `ST4_BATCH` | 256 | Batch size |
+| `ST4_LR` | 0.0001 | Learning rate |
+| `ST4_STRIDE` | 4 | Training-window stride |
+| `ST4_TEST_STRIDE` | 4 | Test-window stride |
+| `ST4_HELD_STRIDE` | 8 | Held-out asset stride |
 
-Jujur: di simbol held-out model **dengan kepala XAUUSD-only** ≈ acak →
-keunggulan hanya muncul di XAUUSD (simbol yang memang dilatih saat fine-tune).
-**Sudah ditemukan solusinya** — lihat "Probe transfer lintas-aset" di bawah:
-kepala dilatih di 16 simbol → NIKKEI AUC 0,4838 → **0,7407**.
-
-### Backtest biaya-nyata (`backtest_stage4.py`, baru)
-
-Skrip baru: ambil `test_pred.npy`, sejajarkan tiap window dengan bar yang
-diakhirinya, lalu taruh taruhan **satu bar ke depan** (horizon yang memang
-dilabeli `nxt`). 780 taruhan independen (stride 64, 2 Jan – 29 Des 2023),
-biaya **1,5 bps/side** (sama seperti `check_flip.py`), round-trip 3 bps.
-
-| strategi | total (net) | rata-rata/taruhan | menang-net | Sharpe/t-stat |
-|---|---|---|---|---|
-| **model, tanpa biaya** | **+6,10%** | **+0,78 bps** | 58,7% | **+5,28** |
-| model, dgn biaya 3 bps RT | −17,30% | −2,22 bps | 22,2% | −14,98 |
-| inverse model | −29,50% | −3,78 bps | 11,0% | −25,54 |
-| selalu long | −23,92% | −3,07 bps | 15,6% | −20,35 |
-| selalu short | −22,88% | −2,93 bps | 17,6% | −19,47 |
-| persistence (ulangi arah bar lalu) | −1,11% | −0,14 bps | 33,2% | −1,29 |
-| buy & hold (window sama) | −0,52% | — | — | — |
-
-(run 1 epoch untuk perbandingan: model gross +4,27% / +0,55 bps / t 3,66.)
-
-Kolom "menang-net" = fraksi taruhan yang **positif setelah biaya** (bukan
-akurasi; akurasi kepala terhadap label = 0,5872 dan sudah sama persis dengan
-yang dilaporkan `stage4_finetune.py`).
-
-**Temuan kunci: breakeven cost = 0,39 bps/side (0,78 bps round-trip).**
-Edge mentah kepala arah (+0,78 bps/taruhan, t-stat 5,28 → nyata, bukan
-kebetulan; run 1 epoch: +0,55 bps, t 3,66) **masih di bawah** asumsi biaya
-1,5 bps/side → pada M5 dengan biaya ini strategi tetap rugi. Jalan keluarnya:
-spread/biaya lebih rendah (XAUUSD spread tipis justru masuk akal untuk
-seleksi taruhan ber-`p` ekstrem), atau horizon lebih panjang dari satu bar.
-
-#### Sweep threshold — taruhan hanya di `p` ekstrem (bagian dari `backtest_stage4.py`)
-
-| thr | n taruhan | akurasi | gross | net @3bps | bps/taruhan | t-stat | BE bps/side |
-|---|---|---|---|---|---|---|---|
-| 0,50 (semua) | 780 | 0,587 | +6,10% | −17,30% | +0,78 | 5,28 | 0,39 |
-| 0,55 | 632 | 0,625 | +6,10% | −12,86% | +0,97 | 5,76 | 0,48 |
-| 0,60 | 497 | 0,672 | +6,35% | −8,56% | +1,28 | 6,82 | 0,64 |
-| 0,65 | 408 | 0,708 | +5,47% | −6,77% | +1,34 | 7,01 | 0,67 |
-| 0,70 | 353 | 0,742 | +5,10% | −5,49% | +1,45 | 6,99 | 0,72 |
-| **0,75** | 285 | **0,779** | +4,44% | −4,11% | **+1,56** | **7,51** | **0,78** |
-
-Seleksi taruhan **menaikkan edge per taruhan 2×** (0,78 → 1,56 bps, akurasi
-0,587 → 0,779) tapi masih di bawah biaya 1,5 bps/side → net tetap minus.
-Catatan: spread XAUUSD ECN yang ketat (±$0,05–0,15 pada harga ±2.000 ≈
-**0,25–0,75 bps/side**) sudah di kisaran breakeven threshold 0,70–0,75 →
-inilah hipotesis yang harus diverifikasi. **Peringatan jujur:** threshold ini
-dipilih *setelah* melihat hasil test → risiko overfitting ke test; pada run
-resmi, pilih threshold di data validasi (2021–2022) lalu kunci sebelum 2023.
-
-### Validasi jujur + hasil net positif (`validate_stage4.py`, baru)
-
-Sebelumnya threshold dipilih *setelah* melihat test (bias). Script ini
-memindahkan **semua** keputusan ke validasi 2021–2022 (1.642 window), lalu
-menyentuh 2023 tepat sekali:
-
-| keputusan | dipilih di validasi | hasil |
-|---|---|---|
-| Platt scaling (a=0,7163, b=−0,1828) | ECE 0,0838 → **0,0607** | test ECE 0,1077 → **0,0828** |
-| threshold taruhan | **0,75** (net +0,25% @1,5bps, n=189) | — |
-| horizon holding | **48 bar** (gross +7,89%, net **+2,22%** @1,5bps) | — |
-
-Tabel horizon di **validasi** (untuk pemilihan) vs **test** (hasil akhir):
-
-| k bar | val gross | val net@1,5bps | test gross | **test net@1,5bps** | test net@0,5bps | test net@3,0bps |
-|---|---|---|---|---|---|---|
-| 1 | +5,92% | +0,25% | +2,08% | −0,53% | +1,21% | −3,14% |
-| 3 | +4,82% | −0,85% | +1,75% | −0,86% | +0,88% | −3,47% |
-| 6 | +4,90% | −0,77% | +0,64% | −1,97% | −0,23% | −4,58% |
-| 12 | +1,75% | −3,92% | +0,39% | −2,22% | −0,48% | −4,83% |
-| 24 | +2,68% | −2,99% | +1,64% | −0,97% | +0,77% | −3,58% |
-| **48** ← dipilih | **+7,89%** | **+2,22%** | **+2,89%** | **+0,28%** ✅ | **+2,02%** ✅ | −2,33% |
-
-**Hasil test (semua keputusan sudah terkunci): 87 taruhan, akurasi 89,66%,
-gross +2,89%, net +0,28% di 1,5 bps/side dan +2,02% di 0,5 bps/side.**
-Ini pertama kali strategi **net positif** dengan protokol yang tidak curang.
-
-Peringatan jujur: n=87 kecil (CI akurasi ±±6%), biaya masih asumsi (slippage
-& komisi broker belum masuk), dan 0,5 bps/side hanya masuk akal di spread
-ECN paling ketat. Angka lengkap: `results/finetune/validation.json`.
-
-### Walk-forward multi-fold (`walkforward_stage4.py`, baru)
-
-Satu hasil test 2023 bersandar pada 87 taruhan — terlalu kecil. Script ini
-menjalankan **3 fold jujur**: tiap fold memilih Platt + threshold + horizon di
-2 tahun sebelumnya, lalu menilai tahun berikutnya (test 2021/2022/2023).
-
-| fold (pilih di → test) | thr | k bar | n | acc | gross | net@0,5bps | net@1,5bps | net@3,0bps |
-|---|---|---|---|---|---|---|---|---|
-| 2019–20 → 2021 | 0,750 | 3 | 46 | 0,9565 | +1,49% | +1,03% | +0,11% | −1,27% |
-| 2020–21 → 2022 | 0,775 | 3 | 26 | 0,9231 | +0,15% | −0,11% | −0,63% | −1,41% |
-| 2021–22 → 2023 | 0,800 | 1 | 44 | 0,8409 | +0,85% | +0,41% | −0,47% | −1,79% |
-| **agregat** | — | — | **116** | **0,9052** | **+2,49%** | **+1,33%** ✅ | −0,99% | −4,47% |
-
-**Interpretasi jujur:**
-
-- **Sinyal akurasi sangat kuat & stabil**: z = **+8,73** terhadap hipotesis
-  50% (p ≈ 1e-17). Akurasi 0,905 dari 116 taruhan out-of-sample bukan kebetulan.
-- **Tapi gross-nya tipis** (rata-rata ±0,21 bps/taruhan di horizon pendek) →
-  di 1,5 bps/side masih **−0,99%**. Profitabel hanya di **≤0,5 bps/side
-  (+1,33%)**, artinya butuh spread ECN paling ketat.
-- n per fold kecil (26–46) karena threshold ekstrem (0,75–0,8) memang jarang
-  memicu taruhan — itu konsekuensi jujur dari "hanya bertaruh saat yakin".
-- Kalibrasi terkalibrasi baik di semua fold (ECE 0,046–0,079).
-
-Angka lengkap: `results/finetune/walkforward.json`, log `logs/walkforward.log`.
-
-### Probe transfer lintas-aset (`probe_transfer.py`, baru)
-
-**Masalah**: kepala stage4 hanya dilatih di XAUUSD → held-out NIKKEI/BRENT/
-EURGBP ≈ acak (AUC 0,484 / 0,529 / 0,522).
-
-**Eksperimen**: backbone pretraining **dibekukan** (hanya forward, murah),
-kepala dir/vol/quantile dilatih di **16 simbol** 2015–2022 (5.163 window,
-stride 1536, 2 epoch, lr 2e-3), lalu dievaluasi di simbol held-out 2023.
-
-| simbol (2023) | AUC kepala XAUUSD-only | **AUC multi-simbol** | Δ | acc lama → baru |
-|---|---|---|---|---|
-| NIKKEI | 0,4838 | **0,7407** | **+0,2569** | 0,4780 → **0,6209** |
-| BRENT | 0,5293 | **0,6320** | +0,1027 | 0,5144 → **0,5733** |
-| EURGBP | 0,5222 | **0,6005** | +0,0783 | 0,5196 → **0,5656** |
-| XAUUSD (bukan held-out, pembanding) | 0,6792 | 0,6913 | +0,0121 | 0,5872 → 0,6051 |
-
-**Kesimpulan:**
-
-1. **Transfer lintas-aset BISA** — hipotesis "kepala belajar pemetaan
-   khas-XAUUSD" **terbukti benar**. Cukup melatih kepala di banyak simbol,
-   held-out langsung naik jauh di atas acak (NIKKEI 0,48 → **0,74**).
-2. **Representasi pretraining memang lintas-aset**: backbone dibekukan
-   (tak ada parameter yang diubah) saja sudah cukup — bukti bahwa tokenisasi +
-   embedding hasil pretraining menyimpan sinyal umum antar-pasar.
-3. XAUUSD sendiri tidak turun (0,679 → 0,691) → melatih multi-simbol tidak
-   mengorbankan simbol asal; justru naik sedikit.
-4. Catatan: NIKKEI/BRENT/EURGBP 2023 adalah **test**, sedangkan latihan
-   memakai tahun ≤2022 → tidak ada kebocoran waktu. n besar (696–815) jadi
-   beda AUC ini tidak mungkin kebetulan.
-
-**Langkah lanjutan yang jelas**: gabungkan probe ini dengan protokol jujur
-(Platt + threshold terkunci + walk-forward) untuk menghasilkan taruhan di 4
-simbol, bukan cuma XAUUSD. Angka lengkap: `results/finetune/transfer.json`.
-
-### Knob untuk mesin kecil (defaults = konfigurasi asli Colab/GPU)
-
-`stage4_finetune.py` bisa dijalankan di CPU tanpa mengubah kode lewat env var:
-
-| env | default | arti |
-|---|---|---|
-| `ST4_EPOCHS` | 3 | jumlah epoch latih |
-| `ST4_BATCH` | 256 | batch size |
-| `ST4_LR` | 1e-4 | learning rate |
-| `ST4_STRIDE` | 4 | stride window latih (per bar) |
-| `ST4_TEST_STRIDE` | 4 | stride window test 2023 |
-| `ST4_HELD_STRIDE` | 8 | stride window simbol held-out |
-| `CKPT` | `ckpt/best.pt` (fallback lokal) | path checkpoint pretraining |
-
-Output lokal kini masuk ke `results/finetune/` (bobot `*.pt`, `*.npy`, `*.csv`
-di-ignore; `metrics.json` tetap di-commit).
-
-### Cara menjalankan ulang di lokal (Windows, CPU)
+Example for a smaller CPU run (PowerShell):
 
 ```powershell
-pip install numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-pip install scikit-learn pandas matplotlib
-
-python download_local.py     # 359 MB, ±20 detik
-python test_tokenizer.py     # wajib PASSED
-python stage2_tokenizer.py   # ±21 menit
-python verify_ckpt.py        # wajib ALIGNED sebelum fine-tune
-
-# konfigurasi CPU kecil (±40 menit untuk 2 epoch di 4 thread; 1 epoch ±23 menit)
-$env:ST4_STRIDE="256"; $env:ST4_TEST_STRIDE="64"; $env:ST4_HELD_STRIDE="128"
-$env:ST4_EPOCHS="2"; $env:ST4_BATCH="16"; $env:ST4_LR="0.0003"
+$env:ST4_EPOCHS="2"
+$env:ST4_BATCH="16"
+$env:ST4_STRIDE="256"
+$env:ST4_TEST_STRIDE="64"
+$env:ST4_HELD_STRIDE="128"
 python -u stage4_finetune.py
-
-# backtest biaya-nyata (pakai env ST4_* yang sama)
-python -u backtest_stage4.py
 ```
 
-### Langkah berikutnya
+For a full reproduction, follow [Reproducibility and data protocol](docs/REPRODUCIBILITY.md) and the experiment notes in [PROGRESS.md](PROGRESS.md). Do not compare runs unless their data split, stride, seed, model checkpoint and cost assumptions match.
 
-1. **Fine-tune penuh di GPU (Colab T4)** dengan konfigurasi asli
-   (`ST4_EPOCHS=3 ST4_STRIDE=4 ST4_BATCH=256`) — 15.087+ window, hasil
-   resmi yang bisa dibandingkan dengan baseline GRU/MLP.
-2. ~~Uji transfer lintas-aset~~ — **sudah terbukti bisa**: `probe_transfer.py`
-   (kepala multi-simbol, backbone beku) → held-out NIKKEI AUC 0,48 → **0,74**,
-   BRENT 0,53 → 0,63, EURGBP 0,52 → 0,60. Lanjutannya: **gabungkan dengan
-   protokol jujur** (Platt + threshold terkunci + walk-forward) untuk
-   menghasilkan taruhan out-of-sample di 4 simbol, bukan cuma XAUUSD.
-3. ~~Backtest biaya-nyata (cost-aware) dari prediksi arah~~ — **sudah ada**:
-   `backtest_stage4.py` (lihat tabel di atas); tinggal dijalankan ulang dengan
-   konfigurasi GPU penuh.
-4. **Kalibrasi + pemilihan threshold/horizon di data validasi** — **sudah
-   dilakukan** oleh `validate_stage4.py` (Platt + threshold 0,75 + horizon
-   48 bar dipilih di 2021–2022, test 2023 disentuh sekali → net +0,28%) dan
-   diperluas ke 3 fold walk-forward (`walkforward_stage4.py`, 116 taruhan,
-   acc 0,905, z +8,73, net +1,33% @0,5bps). Yang masih kurang: **ukur biaya
-   nyata** dari spread komposit broker (sekarang masih asumsi) dan menaikkan
-   gross per taruhan (pretraining 6000 steps + fine-tune penuh).
+## Research snapshot
+
+The committed experiment records include:
+
+- Pretraining checkpoint: `ckpt/best.pt`.
+- Pretraining validation loss recorded at step 3,000: **5.8945**.
+- XAUUSD fine-tuning experiment (CPU run, 2 epochs): accuracy **0.5872**, AUC **0.6792**, Brier score **0.2279**.
+- Frozen-backbone transfer probe: held-out 2023 AUC of **0.7407** for NIKKEI, **0.6320** for BRENT and **0.6005** for EURGBP.
+
+These values describe specific historical runs and configurations. They are not a single unified benchmark and should not be interpreted as live-trading performance. In particular, transaction-cost assumptions and the evaluation protocol must be checked before drawing profitability conclusions. Detailed records are in `results/`, `PROGRESS.md` and the reproducibility guide.
+
+## Quality checks
+
+Run the lightweight checks before submitting changes:
+
+```bash
+python -m compileall -q .
+python test_tokenizer.py
+```
+
+The GitHub Actions workflow runs these checks on pushes and pull requests.
+
+## Documentation
+
+- [Project structure](docs/PROJECT_STRUCTURE.md)
+- [Reproducibility, data splits and evaluation](docs/REPRODUCIBILITY.md)
+- [Contribution guide](CONTRIBUTING.md)
+- [Experiment history](PROGRESS.md)
+
+## Limitations
+
+Financial time series are noisy and non-stationary. A high classification metric does not automatically imply a profitable strategy. Backtests can be affected by look-ahead bias, overlapping windows, survivorship and selection bias, spread, commissions, slippage, latency and regime changes. Validate on untouched chronological data and realistic broker costs before any real-world use.
+
+## License
+
+No license is currently specified for this repository. Unless a license is added by the owner, the source code is not granted an open-source license for reuse or redistribution.

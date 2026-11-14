@@ -1,4 +1,4 @@
-# --- raw / regenerated data (downloadable again, too big for git) ---
+# Raw and regenerated datasets
 corpus/
 npz/
 mkt/
@@ -6,19 +6,36 @@ parts/
 *.zip
 gold_price.csv.gz
 
-# --- python ---
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# --- os / editor ---
+# Virtual environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# OS / editor
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
 
-# --- fine-tune artifacts too heavy for git (metrics.json is kept) ---
+# Fine-tuning artifacts too heavy for source control (metrics are retained)
 results/finetune/*.pt
 results/finetune/*.npy
 results/finetune/*.csv
 
-# --- run logs (local trace; PROGRESS.md holds the human-readable record) ---
+# Local logs and temporary files
 logs/
+*.log
+*.part
