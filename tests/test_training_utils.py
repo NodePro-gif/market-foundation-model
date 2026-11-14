@@ -74,9 +74,9 @@ def test_early_stopping_waits_for_patience_and_resets_on_improvement():
     stopper = EarlyStopping(patience=2, min_delta=0.01)
     assert stopper.observe(1.0) is False
     assert stopper.observe(1.005) is False
-    assert stopper.observe(1.02) is False
-    assert stopper.observe(1.03) is False
-    assert stopper.observe(1.04) is True
+    assert stopper.observe(0.98) is False
+    assert stopper.observe(0.985) is False
+    assert stopper.observe(0.99) is True
 
 
 def test_early_stopping_state_round_trip():
