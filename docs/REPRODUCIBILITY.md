@@ -26,8 +26,8 @@ Record all of the following with each experiment:
 python download_local.py
 python test_tokenizer.py
 python stage2_tokenizer.py
-python verify_ckpt.py
 python stage3_pretrain.py
+python verify_ckpt.py
 python stage4_finetune.py
 python validate_stage4.py
 python backtest_stage4.py

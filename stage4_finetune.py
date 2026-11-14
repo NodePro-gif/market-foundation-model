@@ -74,7 +74,7 @@ class FinetuneDS(Dataset):
         span = z["spans"].astype(np.int64)
         bar_of_tok = np.concatenate(([0], np.cumsum(span)))[:-1]
         ts = lab["ts"]
-        n = min(len(ts), int(bar_of_tok[-1]) + 1)
+        n = min(len(ts), int(bar_of_tok[-1] + span[-1]))
         years_arr = (ts[:n].astype(np.int64).astype("datetime64[s]")
                      .astype("datetime64[Y]").astype(np.int32) + 1970)
         # A BPE token is observable only after every bar it covers has closed.
