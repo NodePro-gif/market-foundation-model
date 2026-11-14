@@ -360,6 +360,13 @@ def main():
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                             lr=LR, betas=(0.9, 0.95), weight_decay=0.01)
     best_val_auc = -float("inf")
+    # Remove cached predictions/calibration from earlier checkpoints so that
+    # validation can never silently reuse stale model outputs.
+    for stale in ("val_pred.npy", "val_y.npy", "val_pred_cal.npy",
+                  "test_pred_cal.npy", "validation.json", "backtest.json"):
+        stale_path = os.path.join(OUT, stale)
+        if os.path.isfile(stale_path):
+            os.remove(stale_path)
     best_path = os.path.join(OUT, "best.pt")
     if os.path.exists(best_path):
         os.remove(best_path)  # never accidentally reuse a checkpoint from an older run
