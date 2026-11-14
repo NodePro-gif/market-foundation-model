@@ -202,25 +202,6 @@ def main():
         horizons=[],
     )
 
-    sig = np.where(pc >= thr, 1, np.where(pc <= 1 - thr, -1, 0))
-    m = sig != 0
-    log(f"test bets with locked threshold {thr}: {int(m.sum())} "
-        f"of {len(sig)} (acc {float(((pred[m] >= .5) == y[m]).mean()):.4f})")
-
-    # Evaluate only the policy selected on 2022. No final-test sweep.
-    test_policy = None
-    eligible = m & (bt + k_best < len(c))
-    sim = simulate_non_overlapping(c, bt[eligible], sig[eligible],
-                                   k_best, COSTS_SIDE[1])
-    test_policy = dict(horizon=k_best, cost_per_side=COSTS_SIDE[1],
-                       trades=sim["trade_count"],
-                       gross_compounded=sim["gross_compounded"],
-                       net_compounded=sim["net_compounded"],
-                       max_drawdown=sim["max_drawdown"])
-    log(f"locked 2023 policy: horizon={k_best}, trades={sim['trade_count']}, "
-        f"net={sim['net_compounded']:+.3%}, maxDD={sim['max_drawdown']:.3%}")
-
-    res["test_policy"] = test_policy
     with open(f"{OUT}/validation.json", "w") as fh:
         json.dump(res, fh, indent=1)
     np.save(f"{OUT}/val_pred_cal.npy", cal(p_all))
