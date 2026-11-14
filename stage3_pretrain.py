@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import time
 
 import numpy as np
@@ -110,17 +111,30 @@ def tokenizer_fingerprint():
     return digest.hexdigest()
 
 
+def _mirror_checkpoint(path):
+    backup_dir = os.environ.get("MFM_CKPT_BACKUP_DIR")
+    if not backup_dir:
+        return
+    os.makedirs(backup_dir, exist_ok=True)
+    target = os.path.join(backup_dir, os.path.basename(path))
+    tmp = target + ".tmp"
+    shutil.copy2(path, tmp)
+    os.replace(tmp, target)
+
+
 def atomic_json(path, payload):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     os.replace(tmp, path)
+    _mirror_checkpoint(path)
 
 
 def atomic_torch_save(payload, path):
     tmp = path + ".tmp"
     torch.save(payload, tmp)
     os.replace(tmp, path)
+    _mirror_checkpoint(path)
 SYM_ID = {s: i for i, s in enumerate(SYMBOLS)}
 TF_ID = {t: i for i, t in enumerate(TF_LIST)}
 
